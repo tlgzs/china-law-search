@@ -6,6 +6,6 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      # 本地自用可改为 0 关闭认证
-      LAW_API_ENFORCE: "1"
+      # 本地自用保持 0；对公网开放时改 1，并在 data/api_keys.json 配 token
+      LAW_API_ENFORCE: "0"
     restart: unless-stopped

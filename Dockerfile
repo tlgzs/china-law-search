@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic
 # RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server/ ./server/
+COPY web/ ./web/
 
 EXPOSE 8001
 CMD ["uvicorn", "server.law_search_service:app", "--host", "0.0.0.0", "--port", "8001"]

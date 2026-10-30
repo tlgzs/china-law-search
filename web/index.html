@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>中国法律法规检索</title>
+<style>
+  :root{
+    --navy:#17293F; --brass:#B7791F; --ok:#2F855A; --danger:#C53030;
+    --bg:#F5F7FA; --line:#E2E8F0; --muted:#5D6B7A; --card:#FFFFFF;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--navy);
+       font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+       font-size:14px;line-height:1.7;-webkit-font-smoothing:antialiased}
+  header{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+  .bar{max-width:980px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{font-size:16px;font-weight:600;letter-spacing:.02em}
+  .brand small{display:block;font-size:12px;font-weight:400;color:var(--muted);letter-spacing:0}
+  .status{margin-left:auto;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .dot{width:7px;height:7px;border-radius:50%;background:#B4B2A9}
+  .dot.on{background:var(--ok)}
+  main{max-width:980px;margin:0 auto;padding:22px 20px 80px}
+  .tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
+  .tab{border:1px solid var(--line);background:var(--card);color:var(--muted);padding:7px 16px;
+       border-radius:8px;cursor:pointer;font-size:13px}
+  .tab.active{background:var(--navy);border-color:var(--navy);color:#fff}
+  .searchbox{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  input[type=text],select,textarea{font:inherit;color:var(--navy);background:var(--card);
+       border:1px solid var(--line);border-radius:8px;padding:10px 12px;outline:none}
+  input[type=text]:focus,textarea:focus,select:focus{border-color:var(--brass)}
+  #q{flex:1 1 320px}
+  #lawName{flex:1 1 260px}
+  #artNum{width:130px}
+  #artSuffix{width:96px}
+  button{font:inherit;border:0;border-radius:8px;padding:10px 20px;background:var(--navy);color:#fff;cursor:pointer}
+  button:hover{opacity:.92}
+  .hint{color:var(--muted);font-size:12px;margin-top:10px}
+  .chk{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;cursor:pointer;user-select:none}
+  .list{margin-top:18px;display:flex;flex-direction:column;gap:10px}
+  .item{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;cursor:pointer}
+  .item:hover{border-color:#C7D2E0}
+  .item.dead{background:#FCFCFD;border-style:dashed}
+  .item h3{margin:0 0 6px;font-size:14px;font-weight:600;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .tag{font-size:11px;padding:1px 7px;border-radius:999px;background:#F1EFE8;color:#5F5E5A;font-weight:400}
+  .tag.law{background:#E6F1FB;color:#185FA5}
+  .tag.bad{background:#FCEBEB;color:#A32D2D}
+  .snip{color:#2C3A4B;font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .item.open .snip{-webkit-line-clamp:unset;display:block;white-space:pre-wrap}
+  .meta{color:var(--muted);font-size:12px;margin-top:8px;display:none;gap:14px;flex-wrap:wrap}
+  .item.open .meta{display:flex}
+  mark{background:#FDF3DC;color:inherit;padding:0 1px}
+  .empty{color:var(--muted);text-align:center;padding:48px 0}
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
+        border-radius:10px;overflow:hidden;margin-top:14px;font-size:13px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#F7F9FB;font-weight:500;color:var(--muted);font-size:12px}
+  tr:last-child td{border-bottom:none}
+  .yes{color:var(--ok);font-weight:500}
+  .no{color:var(--danger);font-weight:500}
+  .full{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-top:16px}
+  .full h2{margin:0 0 10px;font-size:16px;font-weight:600;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+  .full .body{font-size:14px;line-height:1.9;color:#22303F;white-space:pre-wrap}
+  .full .foot{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+       color:var(--muted);font-size:12px;display:flex;gap:16px;flex-wrap:wrap}
+  footer{max-width:980px;margin:0 auto;padding:0 20px 40px;color:var(--muted);font-size:12px}
+  .banner{display:none;background:#FDF3DC;border:1px solid #F0DCA8;border-radius:10px;padding:12px 14px;margin-bottom:16px}
+  .banner input{width:280px}
+  @media (max-width:640px){ .bar{padding:12px 14px} main{padding:16px 14px 60px} #artNum,#artSuffix{width:100%} }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">中国法律法规检索
+      <small>本地法规库 · 条文检索与引文核验</small>
+    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">检测服务中…</span></div>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="authBanner">
+    需要 API Token 才能查询：<input type="text" id="tokenInput" placeholder="粘贴 token 后回车">
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="search">法条检索</button>
+    <button class="tab" data-tab="lookup">条文定位</button>
+    <button class="tab" data-tab="verify">引文核验</button>
+  </div>
+
+  <section id="panel-search">
+    <div class="searchbox">
+      <input type="text" id="q" placeholder="输入关键词，例如：经济补偿 未签订书面劳动合同 二倍工资" autocomplete="off">
+      <select id="type">
+        <option value="">全部类型</option>
+        <option value="law">法律</option>
+        <option value="administrative_regulation">行政法规</option>
+        <option value="local_regulation">地方性法规</option>
+        <option value="judicial_interpretation">司法解释</option>
+      </select>
+      <button id="btnSearch">检索</button>
+    </div>
+    <div class="hint">
+      回车即可检索 ｜ 点击结果展开全文与生效信息
+      <label class="chk" style="margin-left:12px">
+        <input type="checkbox" id="withHistory"> 含已被修订的旧版本条文
+      </label>
+    </div>
+    <div class="list" id="results"></div>
+  </section>
+
+  <section id="panel-lookup" style="display:none">
+    <div class="searchbox">
+      <input type="text" id="lawName" placeholder="法律名称，例如：劳动合同法" autocomplete="off">
+      <input type="text" id="artNum" placeholder="条号，如 82 或 第八十二条" autocomplete="off">
+      <input type="text" id="artSuffix" placeholder="之一（可选）" autocomplete="off">
+      <button id="btnLookup">定位</button>
+    </div>
+    <div class="hint">
+      按「法名 + 条号」精确取条文，不用先检索。
+      <label class="chk" style="margin-left:12px">
+        <input type="checkbox" id="lookupHistory"> 含已被修订的旧版本
+      </label>
+    </div>
+    <div id="lookupOut"></div>
+  </section>
+
+  <section id="panel-verify" style="display:none">
+    <textarea id="citations" rows="6" style="width:100%"
+      placeholder="每行一条引文，例如：&#10;《劳动合同法》第八十二条&#10;民法典第六百八十条&#10;刑法第一百三十三条之一"></textarea>
+    <div class="searchbox" style="margin-top:10px">
+      <button id="btnVerify">核验</button>
+      <span class="hint" style="margin:0">逐条核对是否存在、是否现行有效、是否已被修订</span>
+    </div>
+    <div id="verifyOut"></div>
+  </section>
+</main>
+
+<footer id="foot">法规库状态加载中…</footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let token = localStorage.getItem("law_api_token") || "";
+
+function headers(extra) {
+  const h = Object.assign({"Content-Type": "application/json"}, extra || {});
+  if (token) h["Authorization"] = "Bearer " + token;
+  return h;
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({headers: headers()}, opts || {}));
+  if (res.status === 401) { $("#authBanner").style.display = "block"; throw new Error("需要 Token"); }
+  if (!res.ok) throw new Error("请求失败 " + res.status);
+  return res.json();
+}
+
+function esc(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function highlight(text, q) {
+  const safe = esc(text);
+  if (!q) return safe;
+  const words = q.split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!words.length) return safe;
+  return safe.replace(new RegExp("(" + words.join("|") + ")", "g"), "<mark>$1</mark>");
+}
+
+// 中文数字条号 → 阿拉伯数字（仅覆盖常见「第X条」写法）
+const CN = {零:0,一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10,
+            百:100,千:1000,两:2};
+function cn2num(s) {
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  let total = 0, section = 0, num = 0;
+  for (const ch of s) {
+    const v = CN[ch];
+    if (v === undefined) return NaN;
+    if (v >= 10) { section = (section || 1) * v; total += section; section = 0; }
+    else num = v;
+  }
+  return total + section + num;
+}
+function parseArticle(input) {
+  const m = (input || "").match(/第?([0-9零一二三四五六七八九十百千两]+)条?/);
+  if (!m) return {num: 0, suffix: ""};
+  const suffixMatch = (input || "").match(/条?\s*(之[零一二三四五六七八九十]+)/);
+  return {num: cn2num(m[1]), suffix: suffixMatch ? suffixMatch[1] : ""};
+}
+
+async function loadStatus() {
+  try {
+    const h = await api("/health");
+    $("#dot").classList.add("on");
+    const eff = h.sqlite && (h.sqlite.effective || h.sqlite.count);
+    const n = eff ? eff.toLocaleString() : "—";
+    $("#statusText").textContent = "服务正常 · 现行有效法条 " + n + " 条";
+    $("#foot").textContent = "本地法规库 · 现行有效法条 " + n + " 条 ｜ 向量检索：" +
+      (h.chromadb && h.chromadb.status === "ok" ? "已启用" : "未启用（使用全文检索）") +
+      " ｜ 数据来源：国家法律法规数据库（flk.npc.gov.cn）";
+  } catch (e) {
+    $("#statusText").textContent = "服务未就绪";
+    $("#foot").textContent = "无法连接本地服务，请确认启动脚本仍在运行。";
+  }
+}
+
+function itemHtml(it, q, i) {
+  const dead = it.is_repealed;
+  const tags = [
+    `<span class="tag">${esc(it.article_number || "")}</span>`,
+    it.law_type_label ? `<span class="tag law">${esc(it.law_type_label)}</span>` : "",
+    dead ? `<span class="tag bad">已失效${it.repeal_date ? " · " + esc(it.repeal_date) : ""}</span>` : ""
+  ].join("");
+  return `
+    <div class="item${dead ? " dead" : ""}" data-i="${i}">
+      <h3>${esc(it.law_name)} ${tags}</h3>
+      <div class="snip">${highlight(it.content, q)}</div>
+      <div class="meta">
+        <span>章节：${esc(it.chapter || "—")}</span>
+        <span>公布：${esc(it.publish_date || "—")}</span>
+        <span>施行：${esc(it.effective_date || "—")}</span>
+        ${it.score ? `<span>相关度：${it.score}</span>` : ""}
+        ${dead && it.replaced_by ? `<span>已被新版本取代</span>` : ""}
+      </div>
+    </div>`;
+}
+
+async function search() {
+  const q = $("#q").value.trim();
+  if (!q) return;
+  const box = $("#results");
+  box.innerHTML = '<div class="empty">检索中…</div>';
+  const params = new URLSearchParams({q, k: "20"});
+  if ($("#type").value) params.set("type", $("#type").value);
+  if ($("#withHistory").checked) params.set("include_history", "true");
+  try {
+    const data = await api("/api/law/search?" + params.toString());
+    if (!data.items || !data.items.length) {
+      box.innerHTML = '<div class="empty">没有找到相关条文，换个说法试试（例如去掉口语词，用「经济补偿」代替「赔钱」）。</div>';
+      return;
+    }
+    box.innerHTML = data.items.map((it, i) => itemHtml(it, q, i)).join("");
+    box.querySelectorAll(".item").forEach(el => el.addEventListener("click", () => el.classList.toggle("open")));
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+async function lookup() {
+  const lawName = $("#lawName").value.trim();
+  const rawNum = $("#artNum").value.trim();
+  const manualSuffix = $("#artSuffix").value.trim();
+  const out = $("#lookupOut");
+  if (!lawName || !rawNum) { out.innerHTML = '<div class="empty">填上法律名称和条号再定位</div>'; return; }
+  const parsed = parseArticle(rawNum);
+  if (!parsed.num || Number.isNaN(parsed.num)) { out.innerHTML = '<div class="empty">条号没看懂，试试「82」或「第八十二条」</div>'; return; }
+  const suffix = manualSuffix || parsed.suffix;
+  const params = new URLSearchParams({law_name: lawName, article_num: String(parsed.num)});
+  if (suffix && suffix !== "") params.set("article_suffix", suffix);
+  if ($("#lookupHistory").checked) params.set("include_history", "true");
+  out.innerHTML = '<div class="empty">定位中…</div>';
+  try {
+    const d = await api("/api/law/article?" + params.toString());
+    if (d.error === "not_found") {
+      out.innerHTML = `<div class="empty">库里没有「${esc(lawName)}」第 ${parsed.num} 条${suffix ? "（" + esc(suffix) + "）" : ""}。<br>
+        可能是法名写法不同，或该条确实不存在——检索页搜关键词更容易命中。</div>`;
+      return;
+    }
+    const dead = d.status && d.status !== "effective";
+    out.innerHTML = `
+      <div class="full">
+        <h2>${esc(d.law_name)}
+          <span class="tag">${esc(d.article_number)}</span>
+          ${d.law_type_label ? `<span class="tag law">${esc(d.law_type_label)}</span>` : ""}
+          ${dead ? `<span class="tag bad">已失效</span>` : ""}
+        </h2>
+        <div class="body">${esc(d.content)}</div>
+        <div class="foot">
+          <span>章节：${esc(d.chapter || "—")} ${d.section ? "· " + esc(d.section) : ""}</span>
+          <span>公布：${esc(d.publish_date || "—")}</span>
+          <span>施行：${esc(d.effective_date || "—")}</span>
+          <span>状态：${dead ? esc(d.status) : "现行有效"}</span>
+          ${d.repeal_date ? `<span>失效日期：${esc(d.repeal_date)}</span>` : ""}
+        </div>
+      </div>`;
+  } catch (e) {
+    out.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+async function verify() {
+  const lines = $("#citations").value.split("\n").map(s => s.trim()).filter(Boolean);
+  const out = $("#verifyOut");
+  if (!lines.length) { out.innerHTML = '<div class="empty">先粘贴要核验的引文</div>'; return; }
+  out.innerHTML = '<div class="empty">核验中…</div>';
+  try {
+    const data = await api("/api/law/verify", {method: "POST", body: JSON.stringify({citations: lines})});
+    const rows = data.results.map((r, i) => {
+      const ok = r.verified;
+      let note = "";
+      if (!ok) note = r.error === "parse_failed" ? "引文格式无法解析" : (r.error || "未找到");
+      else if (r.status && r.status !== "effective") note = "状态：" + esc(r.status) + (r.repeal_reason ? "（" + esc(r.repeal_reason) + "）" : "");
+      else if (r.has_multiple_versions) note = "存在多个版本，请人工确认适用版本";
+      else if (r.is_principle_clause) note = "原则性条款，需结合具体条文适用";
+      else note = "与库内条文一致";
+      return `<tr>
+        <td>${esc(lines[i])}</td>
+        <td class="${ok ? "yes" : "no"}">${ok ? "通过" : "未通过"}</td>
+        <td>${esc(r.law_name || "—")} ${esc(r.article_number || "")}</td>
+        <td>${esc(r.status === "effective" ? "现行有效" : (r.status || "—"))}</td>
+        <td>${esc(r.effective_date || "—")}</td>
+        <td>${note}</td>
+      </tr>`;
+    }).join("");
+    out.innerHTML = `<table><thead><tr><th>引文</th><th>结果</th><th>库内匹配</th><th>状态</th><th>施行日期</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    out.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
+  const which = t.dataset.tab;
+  $("#panel-search").style.display = which === "search" ? "" : "none";
+  $("#panel-lookup").style.display = which === "lookup" ? "" : "none";
+  $("#panel-verify").style.display = which === "verify" ? "" : "none";
+}));
+
+$("#btnSearch").addEventListener("click", search);
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+$("#btnLookup").addEventListener("click", lookup);
+["lawName", "artNum", "artSuffix"].forEach(id => {
+  $("#" + id).addEventListener("keydown", e => { if (e.key === "Enter") lookup(); });
+});
+$("#btnVerify").addEventListener("click", verify);
+$("#tokenInput").addEventListener("keydown", e => {
+  if (e.key !== "Enter") return;
+  token = e.target.value.trim();
+  localStorage.setItem("law_api_token", token);
+  $("#authBanner").style.display = "none";
+  loadStatus();
+});
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#q").focus(); }
+});
+loadStatus();
+</script>
+</body>
+</html>

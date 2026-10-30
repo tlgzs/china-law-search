@@ -40,9 +40,11 @@ ChromaDB 向量语义检索 + SQLite 精确查找，双库互补，向量库不�
 import datetime
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
+import sys
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -75,7 +77,7 @@ EMBEDDING_MODEL = os.environ.get("LAW_EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5"
 API_KEYS_FILE = os.environ.get("LAW_API_KEYS_FILE", str(_DATA_DIR / "api_keys.json"))
 CALL_LOG_PATH = os.environ.get("LAW_CALL_LOG_PATH", str(_DATA_DIR / "call_log.jsonl"))
 # 强制模式：1=无 token/错 token → 401；0=软认证（仅记来源，不挡）
-API_ENFORCE = os.environ.get("LAW_API_ENFORCE", "1") not in ("0", "false", "False", "")
+API_ENFORCE = os.environ.get("LAW_API_ENFORCE", "0") not in ("0", "false", "False", "")
 
 
 # ============================================================
@@ -165,6 +167,16 @@ def _check_rate_limit(ip: str, per_min: int, per_day: int) -> tuple[bool, int]:
 
 # 兼容旧用法：保留 API_KEYS 反向索引（client_id → token 集合）
 API_KEYS: dict[str, dict] = load_api_keys()
+
+# 开了强制认证却没有可用 token → 谁也进不来（本地自用场景常见）。
+# 这里自动降级为软认证，日志里明确提示，避免装完就打不开。
+if API_ENFORCE and not API_KEYS:
+    logger.warning(
+        "LAW_API_ENFORCE=1 但未读到任何 token（%s 不存在或为空）→ 自动降级为免认证模式",
+        API_KEYS_FILE,
+    )
+    API_ENFORCE = False
+
 logger.info(
     "API keys loaded: %d client(s)=%s; enforce=%s",
     len(API_KEYS),
@@ -286,6 +298,19 @@ def parse_article_number(text: str) -> int:
     return 0
 
 
+_ARTICLE_SUFFIX_RE = re.compile(r"第[\u4e00-\u9fa5\d]+条\s*(之[\u4e00-\u9fa5]{1,3})")
+
+
+def parse_article_suffix(text: str) -> str:
+    """提取「之一/之二」增补条后缀，无则返回空串。
+
+    刑法修正案类条文写作「第一百三十三条之一」，与「第一百三十三条」
+    是两个独立条文，必须靠后缀区分，否则会串条。
+    """
+    m = _ARTICLE_SUFFIX_RE.search(text or "")
+    return m.group(1) if m else ""
+
+
 def normalize_law_name(name: str) -> str:
     """标准化法律名称，去除书名号。"""
     return name.strip().replace("《", "").replace("》", "")
@@ -302,6 +327,47 @@ def get_db() -> sqlite3.Connection:
 
 
 db = get_db()
+
+
+def _ensure_db_compatible() -> None:
+    """老数据包兼容：补齐新增列（幂等，可反复执行）。
+
+    开源版数据包会持续演进，用户手里的库可能是旧 schema。
+    这里在启动时自动补列，避免升级后直接报 "no such column"。
+    """
+    try:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "law_articles" not in tables:
+            logger.warning("law_articles 表不存在（数据包未放入？）：%s", DB_PATH)
+            return
+        try:
+            sys.path.insert(0, str(_BASE_DIR / "ingest"))
+            from schema import ensure_schema  # noqa: PLC0415
+
+            ensure_schema(db)
+            logger.info("schema 检查完成（ingest/schema.py）")
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ingest/schema.py 不可用，改用内置迁移：%s", e)
+        existing = {r[1] for r in db.execute("PRAGMA table_info(law_articles)")}
+        for column, ddl in {
+            "version_id": "INTEGER",
+            "article_suffix": "TEXT DEFAULT ''",
+            "content_hash": "TEXT",
+            "repeal_date": "TEXT",
+            "repeal_reason": "TEXT",
+            "replaced_by": "TEXT",
+            "is_principle_clause": "INTEGER DEFAULT 0",
+        }.items():
+            if column not in existing:
+                db.execute(f"ALTER TABLE law_articles ADD COLUMN {column} {ddl}")
+        db.commit()
+        logger.info("schema 已补齐（内置迁移）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("schema 兼容检查失败：%s", e)
+
+
+_ensure_db_compatible()
 
 
 # ============================================================
@@ -367,10 +433,13 @@ async def health():
         "public_clients": PUBLIC_CLIENTS,
     }
 
-    # SQLite 状态
+    # SQLite 状态（count=含历史版本，effective=现行有效）
     try:
         sqlite_count = db.execute("SELECT COUNT(*) FROM law_articles").fetchone()[0]
-        result["sqlite"] = {"status": "ok", "count": sqlite_count}
+        effective_count = db.execute(
+            "SELECT COUNT(*) FROM law_articles WHERE status IS NULL OR status != 'repealed'"
+        ).fetchone()[0]
+        result["sqlite"] = {"status": "ok", "count": sqlite_count, "effective": effective_count}
     except Exception as e:
         result["sqlite"] = {"status": "error", "message": str(e)}
         result["status"] = "degraded"
@@ -399,6 +468,7 @@ async def search_laws(
     q: str = Query(..., min_length=1),
     k: int = Query(default=10, ge=1, le=50),
     type: str | None = Query(default=None),
+    include_history: bool = Query(default=False, description="是否包含已被修订的旧版本条文"),
     client_id: str = Depends(verify_token),
 ):
     """向量语义检索法条。ChromaDB 不可用时降级为 SQLite FTS 全文搜索。"""
@@ -409,13 +479,17 @@ async def search_laws(
     # 尝试 ChromaDB 向量检索
     if _chroma_available:
         try:
-            items = _search_via_chromadb(q, k, type)
+            items = _search_via_chromadb(q, k, type, include_history)
             engine = "chromadb"
         except Exception as e:
             logger.warning("ChromaDB search failed, falling back to SQLite: %s", e)
 
     if not items and engine != "chromadb":
-        items = _search_via_sqlite(q, k, type)
+        items = _search_via_sqlite(q, k, type, include_history)
+
+    # 含历史结果时，现行有效条文一律排在已失效条文之前（stable，不打乱相关性顺序）
+    if include_history:
+        items.sort(key=lambda x: x.get("is_repealed", False))
 
     elapsed_ms = int((time.time() - start) * 1000)
     log_call(
@@ -434,17 +508,17 @@ async def search_laws(
     }
 
 
-def _search_via_chromadb(q: str, k: int, law_type: str | None) -> list[dict]:
-    """使用 ChromaDB 向量检索。"""
+def _search_via_chromadb(q: str, k: int, law_type: str | None,
+                        include_history: bool = False) -> list[dict]:
+    """使用 ChromaDB 向量检索。旧版本条文默认过滤。"""
     # 生成查询向量
     query_embedding = _embedding_model.encode(
         [q], normalize_embeddings=True,
     )
 
-    # 构建 filter
-    where_filter = None
-    if law_type:
-        where_filter = {"law_type": law_type}
+    # 构建 filter：状态不在向量库层过滤（旧集合可能没有 status 元数据，
+    # 加了 where 条件会直接查空），改为取回后按元数据在内存里筛。
+    where_filter = {"law_type": law_type} if law_type else None
 
     results = _chroma_collection.query(
         query_embeddings=query_embedding.tolist(),
@@ -453,74 +527,150 @@ def _search_via_chromadb(q: str, k: int, law_type: str | None) -> list[dict]:
     )
 
     items = []
-    for i, (meta, dist) in enumerate(zip(
-        results["metadatas"][0],
-        results["distances"][0],
-    )):
+    for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
+        status = meta.get("status") or "effective"
+        if status == "repealed" and not include_history:
+            continue
         items.append({
             "law_name": meta.get("law_name", ""),
             "law_type": meta.get("law_type", ""),
             "law_type_label": meta.get("law_type_label", ""),
             "article_number": meta.get("article_number", ""),
             "article_num": meta.get("article_number_num", 0),
+            "article_suffix": meta.get("article_suffix") or "",
             "chapter": meta.get("chapter", ""),
             "section": meta.get("section", ""),
             "content": meta.get("content", ""),
             "publish_date": meta.get("publish_date", ""),
             "effective_date": meta.get("effective_date", ""),
+            "status": status,
+            "is_repealed": status == "repealed",
+            "repeal_date": meta.get("repeal_date") or "",
+            "replaced_by": meta.get("replaced_by") or "",
             "score": round(1 - dist, 4),
         })
     return items
 
 
-def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
-    """使用 SQLite FTS 全文搜索（降级方案）。"""
+def _row_to_item(r, score: float = 0.0) -> dict:
+    """把一行法条记录转成 API 返回结构（含时效状态，供前端标注旧版本）。"""
+    status = r["status"] or "effective"
+    return {
+        "law_name": r["law_name"],
+        "law_type": r["law_type"],
+        "law_type_label": r["law_type_label"],
+        "article_number": r["article_number"],
+        "article_num": r["article_number_num"],
+        "article_suffix": r["article_suffix"] or "",
+        "chapter": r["chapter"],
+        "section": r["section"],
+        "content": r["content"],
+        "publish_date": r["publish_date"] or "",
+        "effective_date": r["effective_date"] or "",
+        "status": status,
+        "is_repealed": status == "repealed",
+        "repeal_date": r["repeal_date"] or "",
+        "replaced_by": r["replaced_by"] or "",
+        "score": score,
+    }
+
+
+_COLS = """a.law_name, a.law_type, a.law_type_label, a.article_number,
+           a.article_number_num, a.article_suffix, a.chapter, a.section, a.content,
+           a.publish_date, a.effective_date, a.status, a.repeal_date, a.replaced_by"""
+
+
+def _fts_query(q: str) -> str | None:
+    """把用户输入转成 FTS5 trigram 查询串。
+
+    trigram 分词器按 3 字滑动窗口切词，短于 3 字的查询无法命中，
+    且未加引号时特殊符号会被当成语法 → 统一加双引号并转义。
+    """
+    cleaned = q.strip().replace('"', '""')
+    if len(cleaned) < 3:
+        return None
+    return f'"{cleaned}"'
+
+
+def _match_terms(q: str, size: int = 2, limit: int = 8) -> list[str]:
+    """把查询切成 2 字滑动片段，用于「命中多数即召回」的模糊匹配。
+
+    「未签书面劳动合同」→ 未签/签书/书面/劳动/合同
+    中文没有空格、也没有分词，纯字面匹配会漏掉「未与劳动者订立书面劳动合同」这类改写。
+    """
+    s = re.sub(r"\s+", "", q or "")
+    if len(s) < size * 2:
+        return []
+    grams: list[str] = []
+    for i in range(0, len(s) - size + 1):
+        g = s[i:i + size]
+        if g not in grams:
+            grams.append(g)
+    return grams[:limit]
+
+
+def _search_via_sqlite(q: str, k: int, law_type: str | None,
+                       include_history: bool = False) -> list[dict]:
+    """SQLite 全文检索：优先 FTS5(trigram) + bm25 排序，失败或零命中再退化 LIKE。"""
     type_filter = ""
     params: list[Any] = []
     if law_type:
-        type_filter = " AND law_type = ?"
+        type_filter += " AND a.law_type = ?"
         params.append(law_type)
+    if not include_history:
+        type_filter += " AND (a.status IS NULL OR a.status != 'repealed')"
 
-    # 尝试 FTS 搜索
-    try:
+    # 1) FTS5 检索（有 bm25 相关性排序）
+    fts = _fts_query(q)
+    if fts:
+        try:
+            rows = db.execute(
+                f"""SELECT {_COLS}, bm25(law_articles_fts) AS rank
+                    FROM law_articles_fts
+                    JOIN law_articles a ON a.id = law_articles_fts.rowid
+                    WHERE law_articles_fts MATCH ?{type_filter}
+                    ORDER BY rank
+                    LIMIT ?""",
+                (fts, *params, k),
+            ).fetchall()
+            if rows:
+                # bm25 越小越相关，转成正向 0~1 分数便于前端展示
+                return [_row_to_item(r, round(1.0 / (1.0 + abs(r["rank"])), 4)) for r in rows]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("FTS 检索失败，改用 LIKE：%s", e)
+
+    # 2) LIKE 兜底（短查询、FTS 未建、零命中）
+    rows = db.execute(
+        f"""SELECT {_COLS}
+            FROM law_articles a
+            WHERE (a.content LIKE ? OR a.article LIKE ?){type_filter}
+            LIMIT ?""",
+        (f"%{q}%", f"%{q}%", *params, k),
+    ).fetchall()
+    if rows:
+        return [_row_to_item(r) for r in rows]
+
+    # 3) 片段兜底：中文没有空格，用户写「二倍工资」而原文是「二倍的工资」时，
+    #    字面连续匹配必然落空。这里拆成 2 字片段，命中多数片段即召回，
+    #    按命中数排序——recision 让一点，换可用性。
+    terms = _match_terms(q)
+    if terms:
+        n = len(terms)
+        need = max(2, math.ceil(n * 0.6)) if n > 1 else 1
+        score_sql = " + ".join("(a.content LIKE ?)" for _ in terms)
         rows = db.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                       chapter, section, content, publish_date, effective_date, source_file
-                FROM law_articles
-                WHERE law_articles MATCH ?
-                {type_filter}
+            f"""SELECT * FROM (
+                    SELECT {_COLS}, {score_sql} AS hits
+                    FROM law_articles a
+                    WHERE 1 = 1{type_filter}
+                ) WHERE hits >= ?
+                ORDER BY hits DESC, LENGTH(content) ASC
                 LIMIT ?""",
-            (q, *params, k),
+            (*[f"%{x}%" for x in terms], *params, need, k),
         ).fetchall()
-    except Exception:
-        # FTS 不可用时降级为 LIKE
-        rows = db.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                       chapter, section, content, publish_date, effective_date, source_file
-                FROM law_articles
-                WHERE content LIKE ?
-                {type_filter}
-                LIMIT ?""",
-            (f"%{q}%", *params, k),
-        ).fetchall()
+        return [_row_to_item(r, round(r["hits"] / n, 4)) for r in rows]
 
-    return [
-        {
-            "law_name": r["law_name"],
-            "law_type": r["law_type"],
-            "law_type_label": r["law_type_label"],
-            "article_number": r["article_number"],
-            "article_num": r["article_number_num"],
-            "chapter": r["chapter"],
-            "section": r["section"],
-            "content": r["content"],
-            "publish_date": r["publish_date"] or "",
-            "effective_date": r["effective_date"] or "",
-            "score": 0.0,
-        }
-        for r in rows
-    ]
-
+    return []
 
 # ============================================================
 # API: 精确条号查找
@@ -530,12 +680,20 @@ def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
 async def get_law_article(
     law_name: str = Query(..., min_length=1),
     article_num: int = Query(..., ge=1),
+    article_suffix: str | None = Query(
+        default=None, description="增补条后缀，如「之一」（刑法第一百三十三条之一）"),
+    include_history: bool = Query(default=False, description="是否返回已被修订的旧版本条文"),
     client_id: str = Depends(verify_token),
 ):
     """根据法律名称和条号获取法条正文。支持模糊匹配法律名称。"""
     start = time.time()
     normalized_name = normalize_law_name(law_name)
     original_name = law_name.strip()
+    history_filter = "" if include_history else " AND (status IS NULL OR status != 'repealed')"
+    # 没指定后缀时只认正条，避免「第八十二条」把「第八十二条之一」串进来
+    suffix_filter = " AND article_suffix = ?" if article_suffix else \
+        " AND (article_suffix = '' OR article_suffix IS NULL)"
+    suffix_args: tuple = (article_suffix,) if article_suffix else ()
     logger.info("Looking up: law_name=%s (normalized=%s), article_num=%d",
                 law_name, normalized_name, article_num)
 
@@ -543,14 +701,15 @@ async def get_law_article(
     row = None
     for name_to_try in [original_name, normalized_name]:
         row = db.execute(
-            """SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                      chapter, section, article, content, publish_date, effective_date,
+            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
+                      article_suffix, chapter, section, article, content, publish_date, effective_date,
                       status, repeal_date, repeal_reason, replaced_by, is_principle_clause,
                       source_file
                FROM law_articles
-               WHERE law_name = ? AND article_number_num = ?
+               WHERE law_name = ? AND article_number_num = ?{history_filter}{suffix_filter}
+               ORDER BY CASE WHEN status = 'repealed' THEN 1 ELSE 0 END, id DESC
                LIMIT 1""",
-            (name_to_try, article_num),
+            (name_to_try, article_num, *suffix_args),
         ).fetchone()
         if row:
             break
@@ -558,15 +717,15 @@ async def get_law_article(
     # 模糊匹配
     if not row:
         rows = db.execute(
-            """SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                      chapter, section, article, content, publish_date, effective_date,
+            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
+                      article_suffix, chapter, section, article, content, publish_date, effective_date,
                       status, repeal_date, repeal_reason, replaced_by, is_principle_clause,
                       source_file
                FROM law_articles
-               WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?
-               ORDER BY LENGTH(law_name) ASC
+               WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?{history_filter}{suffix_filter}
+               ORDER BY CASE WHEN status = 'repealed' THEN 1 ELSE 0 END, LENGTH(law_name) ASC
                LIMIT 5""",
-            (f"%{normalized_name}%", f"%{original_name}%", article_num),
+            (f"%{normalized_name}%", f"%{original_name}%", article_num, *suffix_args),
         ).fetchall()
         exact_rows = [r for r in rows if "解释" not in r["law_name"]]
         row = exact_rows[0] if exact_rows else (rows[0] if rows else None)
@@ -589,6 +748,7 @@ async def get_law_article(
         "law_type_label": row["law_type_label"],
         "article_number": row["article_number"],
         "article_num": row["article_number_num"],
+        "article_suffix": row["article_suffix"] or "",
         "chapter": row["chapter"],
         "section": row["section"],
         "article": row["article"],
@@ -633,10 +793,15 @@ class VerifyRequest(BaseModel):
 
 
 @app.post("/api/law/verify")
-async def verify_law_citations(payload: VerifyRequest, client_id: str = Depends(verify_token)):
+async def verify_law_citations(
+    payload: VerifyRequest,
+    include_history: bool = Query(default=False, description="是否用旧版本条文参与核验"),
+    client_id: str = Depends(verify_token),
+):
     """法条批量校验 — 返回完整校验状态（存在性、法律状态、废止信息、原则性条款、多版本歧义）。"""
     start = time.time()
     results = []
+    history_filter = "" if include_history else " AND (status IS NULL OR status != 'repealed')"
 
     for citation in payload.citations:
         # 解析引用
@@ -644,11 +809,14 @@ async def verify_law_citations(payload: VerifyRequest, client_id: str = Depends(
             law_name = citation.get("law_name", "").strip()
             article_number_str = citation.get("article_number", "").strip()
             article_num = parse_article_number(article_number_str)
+            article_suffix = (citation.get("article_suffix") or "").strip() \
+                or parse_article_suffix(article_number_str)
         elif isinstance(citation, str):
             parsed = _parse_citation_string(citation)
             law_name = parsed["law_name"]
             article_num = parsed["article_num"]
             article_number_str = parsed.get("article_number", "")
+            article_suffix = parsed.get("article_suffix", "")
         else:
             results.append(_build_verify_result(
                 law_name=str(citation), article_number="",
@@ -665,14 +833,19 @@ async def verify_law_citations(payload: VerifyRequest, client_id: str = Depends(
 
         # SQLite 查找（返回所有匹配行，检测多版本歧义）
         normalized = normalize_law_name(law_name)
+        suffix_filter = " AND article_suffix = ?" if article_suffix else \
+            " AND (article_suffix = '' OR article_suffix IS NULL)"
+        suffix_args: tuple = (article_suffix,) if article_suffix else ()
         rows = db.execute(
-            """SELECT law_name, article_number, article_number_num, content,
-                      publish_date, effective_date, status, repeal_date,
-                      repeal_reason, replaced_by, is_principle_clause
+            f"""SELECT law_name, article_number, article_number_num, article_suffix,
+                      version_id, content, publish_date, effective_date, status,
+                      repeal_date, repeal_reason, replaced_by, is_principle_clause
                FROM law_articles
-               WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?
-               ORDER BY LENGTH(law_name) ASC""",
-            (f"%{normalized}%", f"%{law_name}%", article_num),
+               WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?{history_filter}{suffix_filter}
+               ORDER BY CASE WHEN law_name = ? OR law_name = ? THEN 0 ELSE 1 END,
+                        LENGTH(law_name) ASC""",
+            (f"%{normalized}%", f"%{law_name}%", article_num, *suffix_args,
+             normalized, law_name),
         ).fetchall()
 
         if not rows:
@@ -686,15 +859,15 @@ async def verify_law_citations(payload: VerifyRequest, client_id: str = Depends(
         non_interpretation = [r for r in rows if "解释" not in r["law_name"]]
         selected_rows = non_interpretation if non_interpretation else rows
 
-        # 检测多版本歧义
-        unique_contents = set(r["content"] or "" for r in selected_rows)
-        has_multiple_versions = len(selected_rows) > 1 and len(unique_contents) > 1
-
-        # 取第一条（最短法律名称 = 最精确匹配）
+        # 检测多版本歧义：只看同一部法规（同名）是否还有别的版本记录
         row = selected_rows[0]
+        same_law = [r for r in selected_rows if r["law_name"] == row["law_name"]]
+        versions = {(r["version_id"], r["publish_date"] or "") for r in same_law}
+        has_multiple_versions = len(versions) > 1
         results.append(_build_verify_result(
             law_name=row["law_name"],
             article_number=row["article_number"],
+            article_suffix=row["article_suffix"] or "",
             verified=True,
             actual_content=row["content"],
             status=row["status"] or "effective",
@@ -723,34 +896,43 @@ async def verify_law_citations(payload: VerifyRequest, client_id: str = Depends(
 
 
 def _parse_citation_string(citation: str) -> dict:
-    """解析字符串引用格式: "《法律名称》第X条" 或 "法律名称第X条"。"""
-    name_match = re.match(r"[《]?(.+?)[》]?第", citation)
-    article_match = re.search(r"第([\u4e00-\u9fa5]+)条", citation)
+    """解析字符串引用。
 
-    if name_match and article_match:
+    支持：《劳动合同法》第八十二条 ｜ 劳动合同法第82条 ｜ 刑法第一百三十三条之一
+    """
+    text = (citation or "").strip()
+    suffix = parse_article_suffix(text)
+
+    m = re.match(r"[《]?(.+?)[》]?\s*第([\u4e00-\u9fa5]+|\d+)条", text)
+    if m:
+        num_text = m.group(2)
+        num = int(num_text) if num_text.isdigit() else chinese_to_arabic(num_text)
         return {
-            "law_name": name_match.group(1).strip(),
-            "article_number": f"第{article_match.group(1)}条",
-            "article_num": chinese_to_arabic(article_match.group(1)),
+            "law_name": m.group(1).strip(),
+            "article_number": f"第{num_text}条{suffix}",
+            "article_num": num,
+            "article_suffix": suffix,
         }
 
-    # 尝试提取数字
-    num_match = re.search(r"(\d+)", citation)
+    # 兜底：只给数字，例如 "劳动合同法 82"
+    num_match = re.search(r"(\d+)", text)
     if num_match:
         return {
-            "law_name": citation.split(str(num_match.group(1)))[0]
+            "law_name": text.split(num_match.group(1))[0]
                         .replace("《", "").replace("》", "").replace("第", "").strip(),
-            "article_number": f"第{num_match.group(1)}条",
+            "article_number": f"第{num_match.group(1)}条{suffix}",
             "article_num": int(num_match.group(1)),
+            "article_suffix": suffix,
         }
 
-    return {"law_name": "", "article_number": "", "article_num": 0}
+    return {"law_name": "", "article_number": "", "article_num": 0, "article_suffix": ""}
 
 
 def _build_verify_result(
     law_name: str,
     article_number: str,
     verified: bool,
+    article_suffix: str = "",
     actual_content: str | None = None,
     error: str | None = None,
     status: str | None = None,
@@ -765,6 +947,7 @@ def _build_verify_result(
     return {
         "law_name": law_name,
         "article_number": article_number,
+        "article_suffix": article_suffix,
         "verified": verified,
         "actual_content": actual_content,
         "error": error,
@@ -831,8 +1014,12 @@ async def law_stats(client_id: str = Depends(verify_token)):
         result_count=1,
         elapsed_ms=elapsed_ms,
     )
+    effective = db.execute(
+        "SELECT COUNT(*) FROM law_articles WHERE status IS NULL OR status != 'repealed'"
+    ).fetchone()[0]
     return {
         "total_articles": total,
+        "effective_articles": effective,
         "by_type": by_type,
         "chromadb_status": chromadb_status,
         "chromadb_count": chromadb_count,
@@ -861,6 +1048,17 @@ async def startup_event():
         logger.info("Vector search enabled (ChromaDB)")
     else:
         logger.info("Vector search disabled, using SQLite FTS fallback")
+
+
+# ============================================================
+# 本地查询界面（律师直接打开 http://127.0.0.1:8001 使用）
+# ============================================================
+
+_WEB_DIR = _BASE_DIR / "web"
+if _WEB_DIR.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="web")
 
 
 if __name__ == "__main__":

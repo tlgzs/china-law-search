@@ -1,6 +1,15 @@
-# 数据与敏感文件一律不入库
+# ---- 数据与敏感文件（一律不入库）----
 data/*
 !data/.gitkeep
+inbox/*
+!inbox/.gitkeep
+reports/
+dist/
+
+# 令牌与日志
+api_keys.json
+*.jsonl
+*.log
 
 # Python
 __pycache__/
@@ -11,7 +20,6 @@ venv/
 # 环境配置
 .env
 
-# 日志与临时文件
-*.log
-*.jsonl
+# 系统
 .DS_Store
+Thumbs.db
