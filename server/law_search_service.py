@@ -1,4 +1,4 @@
-"""Yilvai Law Search — 中国法律法规检索 API（双库架构）。
+"""China Law Search API — 中国法律法规检索 API（双库架构）。
 
 ChromaDB 向量语义检索 + SQLite 精确查找，双库互补，向量库不可用自动降级 FTS。
 
@@ -353,7 +353,7 @@ def init_chromadb():
 # FastAPI 应用
 # ============================================================
 
-app = FastAPI(title="Yilvai Law Search API", version="2.2.0")
+app = FastAPI(title="China Law Search API", version="2.2.0")
 
 
 @app.get("/health")

@@ -1,4 +1,4 @@
-# Yilvai Law Search API — 中国法律法规检索 API
+# China Law Search API — 中国法律法规检索 API
 
 开箱即用的中国法律法规检索服务：**ChromaDB 向量语义检索 + SQLite FTS 精确查找** 双库架构，附带从国家法律法规数据库原始数据到可检索库的完整数据流水线。
 
