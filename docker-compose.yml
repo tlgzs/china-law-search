@@ -1,0 +1,11 @@
+services:
+  law-api:
+    build: .
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    environment:
+      # 本地自用可改为 0 关闭认证
+      LAW_API_ENFORCE: "1"
+    restart: unless-stopped
