@@ -28,6 +28,9 @@ def norm_law_name(name: str) -> str:
     """规范化法律名称，仅用于同名判定，不改写展示用原名。"""
     s = (name or "").strip().replace("《", "").replace("》", "")
     s = re.sub(r"\s+", "", s)
+    # 源数据里存在「XX条例_」这种尾带下划线的名称，若不去掉，同一部法会被
+    # 拆成两个 norm_name，检索时返回两条结果、其中一条还是错字版。
+    s = s.rstrip("_＿")
     if s.startswith("中华人民共和国"):
         s = s[len("中华人民共和国"):]
     return s

@@ -42,7 +42,7 @@ def iter_markdown(root: str):
 
 
 def collect(markdown_dir: str):
-    """返回 {norm_name: [file_record, ...]}，每部法按公布日期升序。"""
+    """返回 ({norm_name: [file_record, ...]}, 多份文件的法规数)。每部法按公布日期升序。"""
     by_law: dict[str, list[dict]] = defaultdict(list)
     for path, dir_label in iter_markdown(markdown_dir):
         result = parse_markdown_file(path, dir_label)
@@ -83,9 +83,23 @@ def collect(markdown_dir: str):
                 "articles": articles,
             }
         )
+    multi = 0
     for files in by_law.values():
-        files.sort(key=lambda f: f["publish_date"] or "")
-    return by_law
+        # 排序即「新旧判定」：公布日期升序，最后一份被当作最新版（status=effective）。
+        # 同日或无日期时，让元数据更完整、条文更多的那份排后面：源数据里同一部法
+        # 常有两份转换件（一份名称带尾下划线、无公布日期），不能让它们互相当版本，
+        # 更不能两条都标成现行有效。
+        files.sort(
+            key=lambda f: (
+                f["publish_date"] or "",
+                len(f["articles"]),
+                1 if f["law_type_label"] else 0,
+                f["source_file"],
+            )
+        )
+        if len(files) > 1:
+            multi += 1
+    return by_law, multi
 
 
 def insert_version(conn: sqlite3.Connection, record: dict, status: str, batch_id: str,
@@ -162,7 +176,7 @@ def build(markdown_dir: str, output: str, keep_history: bool, replace: bool) -> 
     conn.execute("INSERT INTO ingest_batches(id, started_at, note) VALUES (?,?,?)",
                  (batch_id, now_iso(), "build_sqlite_from_markdown"))
 
-    by_law = collect(markdown_dir)
+    by_law, multi_files = collect(markdown_dir)
     total_laws = total_articles = skipped_versions = 0
     for _norm, files in by_law.items():
         chosen = files if keep_history else files[-1:]
@@ -206,6 +220,7 @@ def build(markdown_dir: str, output: str, keep_history: bool, replace: bool) -> 
         "laws": laws,
         "articles": stats,
         "skipped_versions": skipped_versions,
+        "multi_files": multi_files,
         "output": output,
     }
 
@@ -224,6 +239,8 @@ def main() -> None:
     print(f"完成：{info['output']}")
     print(f"  corpus_version = {info['corpus_version']}")
     print(f"  法规 {info['laws']} 部，法条 {info['articles']} 条")
+    if info["multi_files"]:
+        print(f"  有 {info['multi_files']} 部法规存在多份文件（历史版本或重复转换件）")
     if info["skipped_versions"]:
         print(f"  跳过历史版本 {info['skipped_versions']} 份（只保留每部法规最新版，加 --keep-history 可保留）")
 

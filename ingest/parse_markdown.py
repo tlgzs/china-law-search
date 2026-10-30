@@ -156,7 +156,10 @@ def parse_filename(filename: str, dir_label: str = "") -> dict:
 
     # 如果没有从文件名提取到分类,用目录标签推断
     if not result["law_type"] and dir_label:
-        type_info = _LAW_TYPE_MAP.get(dir_label)
+        # 目录名形如「地方法规_markdown」，而 _LAW_TYPE_MAP 的键是「地方法规」；
+        # 不归一的话，凡文件名里没写分类的文件都会得到空分类。
+        dir_key = re.sub(r"_markdown$", "", dir_label.strip())
+        type_info = _LAW_TYPE_MAP.get(dir_key) or _LAW_TYPE_MAP.get(dir_label)
         if type_info:
             result["law_type"] = type_info[0]
             result["law_type_label"] = type_info[1]
@@ -180,6 +183,8 @@ def parse_filename(filename: str, dir_label: str = "") -> dict:
     result["law_name"] = filename[:name_end].strip()
     # 清理文件名开头的特殊字符
     result["law_name"] = result["law_name"].lstrip("+*·")
+    # 源文件名尾部常带 "_"（如「XX条例_.md」），会把同一部法拆成两个名称
+    result["law_name"] = result["law_name"].rstrip("_＿").strip()
 
     return result
 
@@ -199,7 +204,9 @@ _CHAPTER_PATTERN = re.compile(r"^#{0,4}\s*(第[零〇一二三四五六七八九
 _SECTION_PATTERN = re.compile(r"^#{0,4}\s*(第[零〇一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟0-9]+节)\s*(.*)")
 
 # 匹配文件头部的 metadata 行: "- 法律名称：xxx"
-_META_PATTERN = re.compile(r"^[-*]\s*(.+?)[:：]\s*(.+)$")
+# 值必须允许为空：源文件里 "- 公布日期：" 常常是空值，若要求 (.+) 则整行不匹配，
+# 解析器会误判 metadata 区结束，把其后的 "- 法律法规分类：地方性法规" 一并丢掉。
+_META_PATTERN = re.compile(r"^[-*]\s*(.+?)[:：]\s*(.*)$")
 
 
 @dataclass
@@ -300,7 +307,7 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
 
         # 文件标题: "# 法规名称"
         if stripped.startswith("# ") and not stripped.startswith("## "):
-            title = stripped[2:].strip()
+            title = stripped[2:].strip().rstrip("_＿").strip()
             if title and not result.law_name:
                 result.law_name = title
             in_metadata_block = False
@@ -313,7 +320,7 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
                 key = meta_match.group(1).strip()
                 value = meta_match.group(2).strip()
                 if "名称" in key and value:
-                    result.law_name = value
+                    result.law_name = value.rstrip("_＿").strip()
                 elif "公布" in key and value:
                     result.publish_date = value
                 elif "施行" in key and value:
@@ -334,6 +341,10 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
         chapter_match = _CHAPTER_PATTERN.match(stripped)
         if chapter_match and "条" not in stripped:
             current_chapter = stripped.lstrip("#").strip()
+            # 换章必须清空节：文件开头的「目录」会把最后一个节（如「第三节 非全日制用工」）
+            # 提前写进 current_section，若不清空，全文每一条都会挂上那个节。
+            # 且「节」只在所属章内有效，跨章继承本身就是错的。
+            current_section = ""
             found_first_content = True
             continue
 
