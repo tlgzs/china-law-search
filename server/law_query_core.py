@@ -114,6 +114,64 @@ def parse_citation_string(citation: str) -> dict:
     return {"law_name": "", "article_number": "", "article_num": 0, "article_suffix": ""}
 
 
+# 「第八十二条」「第八十二、八十七条」「第一百三十三条之一」都认
+_CN_NUM_CHARS = r"0-9零一二三四五六七八九十百千万亿两"
+_ARTICLE_HIT_RE = re.compile(
+    rf"第([{_CN_NUM_CHARS}]+(?:[、,，][{_CN_NUM_CHARS}]+)*)条(之[{_CN_NUM_CHARS}]+)?")
+
+# Python 3.6 兼容写法，避免 f-string 里再嵌 f-string
+
+
+def _normalize_multi_article(text: str) -> str:
+    """把「第八十二、八十七条」补成「第八十二条、第八十七条」。
+
+    中文文书里省略后一个「第」是常见写法，但正则只认带「第…条」的形式，
+    不补齐就会被判成解析失败。
+    """
+    def repl(m):
+        suffix = m.group(2) or ""
+        parts = [p for p in re.split(r"[、,，]", m.group(1)) if p.strip()]
+        return "、".join(f"第{p}条{suffix}" for p in parts)
+    return _ARTICLE_HIT_RE.sub(repl, text or "")
+
+
+def expand_citation(citation: str) -> list:
+    """把并列引文展开成多条。
+
+    「《劳动合同法》第八十二条、第八十七条」是一次引两个条文，必须分别核。
+    以前只在网页前端拆，直接调 HTTP / MCP 的 agent 传并列引文时，
+    后端只解析第一条，第二条被静默丢掉——结果照样报「通过」。
+    这是假阳性，比查不到更危险，所以拆在解析层，前端后端共用一套。
+    """
+    text = _normalize_multi_article((citation or "").strip())
+    first = parse_citation_string(text)
+    law_name = (first.get("law_name") or "").strip()
+    if not law_name:
+        return [first]
+
+    hits = list(_ARTICLE_HIT_RE.finditer(text))
+    if not hits:
+        return [first]
+
+    out = []
+    for hit in hits:
+        suffix = hit.group(2) or ""
+        for num_text in re.split(r"[、,，]", hit.group(1)):
+            num_text = num_text.strip()
+            if not num_text:
+                continue
+            num = int(num_text) if num_text.isdigit() else chinese_to_arabic(num_text)
+            if num <= 0:
+                continue
+            out.append({
+                "law_name": law_name,
+                "article_number": f"第{num_text}条{suffix}",
+                "article_num": num,
+                "article_suffix": suffix,
+            })
+    return out if len(out) > 1 else [first]
+
+
 # ============================================================
 # 行 → 字典
 # ============================================================
@@ -189,6 +247,7 @@ def _build_verify_result(
     replaced_by: str | None = None,
     is_principle_clause: bool = False,
     has_multiple_versions: bool = False,
+    source_citation: str = "",
 ) -> dict:
     """构建校验结果，确保所有字段都返回。"""
     return {
@@ -205,6 +264,8 @@ def _build_verify_result(
         "replaced_by": replaced_by,
         "is_principle_clause": is_principle_clause,
         "has_multiple_versions": has_multiple_versions,
+        # 一行并列引文会拆成多条结果，调用方靠这个字段把结果对回原文
+        "source_citation": source_citation,
     }
 
 
@@ -635,7 +696,17 @@ class LawStore:
         results: list[dict] = []
         history_filter = self._history_clause(include_history, "law_articles")
 
-        for citation in citations or []:
+        # 并列引文（「第八十二条、第八十七条」）先展开，一行引两个条文就得核两次。
+        # 放在这里而不是前端，是为了让 HTTP 与 MCP 两条路径行为一致。
+        expanded: list = []
+        for c in citations or []:
+            if isinstance(c, str):
+                for item in expand_citation(c):
+                    expanded.append((item, c))
+            else:
+                expanded.append((c, ""))
+
+        for citation, source_text in expanded:
             if isinstance(citation, dict):
                 law_name = (citation.get("law_name") or "").strip()
                 article_number_str = (citation.get("article_number") or "").strip()
@@ -652,6 +723,7 @@ class LawStore:
                 results.append(_build_verify_result(
                     law_name=str(citation), article_number="",
                     verified=False, error="invalid_citation_format",
+                    source_citation=source_text or str(citation),
                 ))
                 continue
 
@@ -659,6 +731,7 @@ class LawStore:
                 results.append(_build_verify_result(
                     law_name=law_name, article_number=article_number_str,
                     verified=False, error="parse_failed",
+                    source_citation=source_text,
                 ))
                 continue
 
@@ -681,6 +754,7 @@ class LawStore:
                 results.append(_build_verify_result(
                     law_name=law_name, article_number=article_number_str,
                     verified=False, error="未找到该法条",
+                    source_citation=source_text,
                 ))
                 continue
 
@@ -704,6 +778,7 @@ class LawStore:
                 replaced_by=row["replaced_by"] or "",
                 is_principle_clause=bool(row["is_principle_clause"]),
                 has_multiple_versions=len(versions) > 1,
+                source_citation=source_text,
             ))
 
         return {

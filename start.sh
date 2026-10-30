@@ -23,7 +23,7 @@ fi
 if [ ! -f data/law_data.db ]; then
   echo ""
   echo "提示：还没有数据文件 data/law_data.db"
-  echo "      先运行这一行下载（约 262 MB，含校验）："
+  echo "      先运行这一行下载（约 490 MB，含校验）："
   echo "        python3 tools/fetch_data.py"
   echo "      服务仍会启动，但查不到任何条文。"
   echo ""

@@ -347,29 +347,17 @@ async function lookup() {
   }
 }
 
-// 一行里写多条并列引文时拆开发送：「《劳动合同法》第八十二条、第八十七条」
-// 后端只解析第一条，不拆的话后一条会被静默丢掉、结果仍显示「通过」。
-function splitCitations(line) {
-  const parts = line.split(/[、；;]/).map(s => s.trim()).filter(Boolean);
-  if (parts.length <= 1) return [line];
-  const lawMatch = line.match(/[《]([^》]+)[》]/);
-  const law = lawMatch ? lawMatch[1] : "";
-  return parts.map((p, i) => {
-    if (i > 0 && law && !p.includes("《")) return "《" + law + "》" + p.replace(/^第?/, "第");
-    return p;
-  });
-}
-
+// 并列引文（「《劳动合同法》第八十二条、第八十七条」）由后端拆。
+// 前端只按行提交，结果里带 source_citation 指回原句——一行引两个条文会返回两行结果，
+// 靠它才能对上号。以前在前端用顿号硬拆，遇到「第八十二、八十七条」会把
+// 「第八十二条」拆成「第八十二条」和「第八十七条」两个残缺片段，第一条必然判失败。
 async function verify() {
   const lines = $("#citations").value.split("\n").map(s => s.trim()).filter(Boolean);
   const out = $("#verifyOut");
   if (!lines.length) { out.innerHTML = '<div class="empty">先粘贴要核验的引文</div>'; return; }
-  // 展开成扁平列表，并记住每条来自原始第几行
-  const flat = [];
-  lines.forEach((line, li) => splitCitations(line).forEach(c => flat.push({c, li})));
-  out.innerHTML = '<div class="empty">核验中…（共 ' + flat.length + ' 条）</div>';
+  out.innerHTML = '<div class="empty">核验中…（共 ' + lines.length + ' 行）</div>';
   try {
-    const data = await api("/api/law/verify", {method: "POST", body: JSON.stringify({citations: flat.map(x => x.c)})});
+    const data = await api("/api/law/verify", {method: "POST", body: JSON.stringify({citations: lines})});
     const rows = data.results.map((r, i) => {
       const ok = r.verified;
       let note = "";
@@ -379,7 +367,7 @@ async function verify() {
       else if (r.is_principle_clause) note = "原则性条款，需结合具体条文适用";
       else note = "与库内条文一致";
       return `<tr>
-        <td>${esc(flat[i] ? flat[i].c : "")}</td>
+        <td>${esc(r.source_citation || r.law_name || "")}</td>
         <td class="${ok ? "yes" : "no"}">${ok ? "通过" : "未通过"}</td>
         <td>${esc(r.law_name || "—")} ${esc(r.article_number || "")}</td>
         <td>${esc(r.status === "effective" ? "现行有效" : (r.status || "—"))}</td>

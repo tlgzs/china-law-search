@@ -691,84 +691,11 @@ async def verify_law_citations(
 ):
     """法条批量校验 — 返回完整校验状态（存在性、法律状态、废止信息、原则性条款、多版本歧义）。"""
     start = time.time()
-    results = []
-    history_filter = "" if include_history else " AND (status IS NULL OR status != 'repealed')"
-
-    for citation in payload.citations:
-        # 解析引用
-        if isinstance(citation, dict):
-            law_name = citation.get("law_name", "").strip()
-            article_number_str = citation.get("article_number", "").strip()
-            article_num = parse_article_number(article_number_str)
-            article_suffix = (citation.get("article_suffix") or "").strip() \
-                or parse_article_suffix(article_number_str)
-        elif isinstance(citation, str):
-            parsed = _parse_citation_string(citation)
-            law_name = parsed["law_name"]
-            article_num = parsed["article_num"]
-            article_number_str = parsed.get("article_number", "")
-            article_suffix = parsed.get("article_suffix", "")
-        else:
-            results.append(_build_verify_result(
-                law_name=str(citation), article_number="",
-                verified=False, error="invalid_citation_format",
-            ))
-            continue
-
-        if not law_name or article_num <= 0:
-            results.append(_build_verify_result(
-                law_name=law_name, article_number=article_number_str,
-                verified=False, error="parse_failed",
-            ))
-            continue
-
-        # SQLite 查找（返回所有匹配行，检测多版本歧义）
-        normalized = normalize_law_name(law_name)
-        suffix_filter = " AND article_suffix = ?" if article_suffix else \
-            " AND (article_suffix = '' OR article_suffix IS NULL)"
-        suffix_args: tuple = (article_suffix,) if article_suffix else ()
-        rows = db.execute(
-            f"""SELECT law_name, article_number, article_number_num, article_suffix,
-                      version_id, content, publish_date, effective_date, status,
-                      repeal_date, repeal_reason, replaced_by, is_principle_clause
-               FROM law_articles
-               WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?{history_filter}{suffix_filter}
-               ORDER BY CASE WHEN law_name = ? OR law_name = ? THEN 0 ELSE 1 END,
-                        LENGTH(law_name) ASC""",
-            (f"%{normalized}%", f"%{law_name}%", article_num, *suffix_args,
-             normalized, law_name),
-        ).fetchall()
-
-        if not rows:
-            results.append(_build_verify_result(
-                law_name=law_name, article_number=article_number_str,
-                verified=False, error="未找到该法条",
-            ))
-            continue
-
-        # 过滤司法解释优先匹配非解释的
-        non_interpretation = [r for r in rows if "解释" not in r["law_name"]]
-        selected_rows = non_interpretation if non_interpretation else rows
-
-        # 检测多版本歧义：只看同一部法规（同名）是否还有别的版本记录
-        row = selected_rows[0]
-        same_law = [r for r in selected_rows if r["law_name"] == row["law_name"]]
-        versions = {(r["version_id"], r["publish_date"] or "") for r in same_law}
-        has_multiple_versions = len(versions) > 1
-        results.append(_build_verify_result(
-            law_name=row["law_name"],
-            article_number=row["article_number"],
-            article_suffix=row["article_suffix"] or "",
-            verified=True,
-            actual_content=row["content"],
-            status=row["status"] or "effective",
-            effective_date=row["effective_date"] or "",
-            repeal_date=row["repeal_date"] or "",
-            repeal_reason=row["repeal_reason"] or "",
-            replaced_by=row["replaced_by"] or "",
-            is_principle_clause=bool(row["is_principle_clause"]),
-            has_multiple_versions=has_multiple_versions,
-        ))
+    # 核验逻辑只在 LawStore.verify 里实现一份。这里以前复制过一遍同样的 SQL，
+    # 结果是「并列引文拆分」这类修复补了内核、漏了 HTTP —— agent 调 MCP 能拆，
+    # 网页调 HTTP 却只核第一条，还照样报通过。
+    data = LawStore(db).verify(payload.citations, include_history=include_history)
+    results = data["results"]
 
     elapsed_ms = int((time.time() - start) * 1000)
     log_call(
