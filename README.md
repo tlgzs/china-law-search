@@ -163,6 +163,7 @@ curl -X POST http://127.0.0.1:8001/api/law/verify \
 python ingest/convert_docx_batch.py --input-dir ./raw --output-dir ./md
 
 # 2) 解析条号与章节，写入 SQLite（唯一真源），同时建 FTS 索引
+#    默认每部法规只取最新版本；要连历史版本一起入库加 --keep-history
 python ingest/build_sqlite_from_markdown.py --markdown-dir ./md --output-path ./data/law_data.db
 
 # 3) 可选：构建向量索引，启用语义检索

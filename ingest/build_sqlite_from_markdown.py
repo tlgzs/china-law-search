@@ -88,7 +88,8 @@ def collect(markdown_dir: str):
     return by_law
 
 
-def insert_version(conn: sqlite3.Connection, record: dict, status: str, batch_id: str) -> int:
+def insert_version(conn: sqlite3.Connection, record: dict, status: str, batch_id: str,
+                   repeal_date: str = "") -> int:
     cur = conn.execute(
         """INSERT INTO law_versions
            (law_name, norm_name, law_type, law_type_label, publish_date, effective_date,
@@ -115,8 +116,8 @@ def insert_version(conn: sqlite3.Connection, record: dict, status: str, batch_id
         """INSERT OR REPLACE INTO law_articles
            (vector_id, version_id, law_name, law_type, law_type_label, article_number,
             article_number_num, article_suffix, chapter, section, article, content, content_hash,
-            publish_date, effective_date, issuing_authority, status, source_file)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            publish_date, effective_date, issuing_authority, status, repeal_date, source_file)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [
             (
                 f"{record['source_file']}|{a['article_number_num']}{a['article_suffix']}",
@@ -135,7 +136,9 @@ def insert_version(conn: sqlite3.Connection, record: dict, status: str, batch_id
                 a["publish_date"],
                 a["effective_date"],
                 a["issuing_authority"],
-                "effective",
+                # 旧版本条文必须标 repealed，否则会被当成现行法条检索出来
+                "repealed" if status == "superseded" else "effective",
+                repeal_date,
                 a["source_file"],
             )
             for a in record["articles"]
@@ -160,20 +163,33 @@ def build(markdown_dir: str, output: str, keep_history: bool, replace: bool) -> 
                  (batch_id, now_iso(), "build_sqlite_from_markdown"))
 
     by_law = collect(markdown_dir)
-    total_laws = total_articles = 0
+    total_laws = total_articles = skipped_versions = 0
     for _norm, files in by_law.items():
         chosen = files if keep_history else files[-1:]
+        skipped_versions += len(files) - len(chosen)
         for idx, record in enumerate(chosen):
-            is_latest = record is chosen[-1]
+            is_latest = idx == len(chosen) - 1
             status = "effective" if is_latest else "superseded"
-            version_id = insert_version(conn, record, status, batch_id)
-            if not keep_history and not is_latest:  # 理论上不会发生
-                conn.execute("DELETE FROM law_articles WHERE version_id = ?", (version_id,))
+            repeals_on = "" if is_latest else (chosen[idx + 1]["effective_date"] or "")
+            insert_version(conn, record, status, batch_id, repeals_on)
             total_articles += len(record["articles"])
         total_laws += 1
-        if not keep_history:
-            conn.execute("DELETE FROM law_articles WHERE version_id NOT IN "
-                         "(SELECT id FROM law_versions WHERE status='effective')")
+
+    # 旧版本标明被哪个版本取代
+    conn.execute(
+        "UPDATE law_versions SET superseded_by = ("
+        "  SELECT MAX(v2.id) FROM law_versions v2"
+        "  WHERE v2.norm_name = law_versions.norm_name AND v2.status = 'effective'"
+        ") WHERE status = 'superseded'"
+    )
+
+    # 只保留最新版本时，把旧版本连同条文一并清掉（循环外做一次，避免逐部全表扫描）
+    if not keep_history:
+        conn.execute(
+            "DELETE FROM law_articles WHERE version_id NOT IN "
+            "(SELECT id FROM law_versions WHERE status='effective')"
+        )
+        conn.execute("DELETE FROM law_versions WHERE status != 'effective'")
 
     conn.execute(
         "UPDATE ingest_batches SET finished_at=?, file_count=?, added_laws=?, added_articles=? WHERE id=?",
@@ -185,7 +201,13 @@ def build(markdown_dir: str, output: str, keep_history: bool, replace: bool) -> 
     laws = conn.execute("SELECT COUNT(DISTINCT norm_name) FROM law_versions").fetchone()[0]
     conn.commit()
     conn.close()
-    return {"corpus_version": version, "laws": laws, "articles": stats, "output": output}
+    return {
+        "corpus_version": version,
+        "laws": laws,
+        "articles": stats,
+        "skipped_versions": skipped_versions,
+        "output": output,
+    }
 
 
 def main() -> None:
@@ -202,6 +224,8 @@ def main() -> None:
     print(f"完成：{info['output']}")
     print(f"  corpus_version = {info['corpus_version']}")
     print(f"  法规 {info['laws']} 部，法条 {info['articles']} 条")
+    if info["skipped_versions"]:
+        print(f"  跳过历史版本 {info['skipped_versions']} 份（只保留每部法规最新版，加 --keep-history 可保留）")
 
 
 if __name__ == "__main__":
