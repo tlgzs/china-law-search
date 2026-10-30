@@ -429,6 +429,19 @@ async def health():
             "SELECT COUNT(*) FROM law_articles WHERE status IS NULL OR status != 'repealed'"
         ).fetchone()[0]
         result["sqlite"] = {"status": "ok", "count": sqlite_count, "effective": effective_count}
+
+        # 数据版本：法条有时效，使用者必须能一眼看到自己查的是哪一版
+        try:
+            meta = {
+                r[0]: r[1]
+                for r in db.execute("SELECT key, value FROM corpus_meta").fetchall()
+            }
+            result["sqlite"]["corpus_version"] = meta.get("corpus_version")
+            result["sqlite"]["snapshot_date"] = meta.get("snapshot_date")
+        except sqlite3.Error:
+            # 老库没有 corpus_meta 表，不影响健康检查
+            result["sqlite"]["corpus_version"] = None
+            result["sqlite"]["snapshot_date"] = None
     except Exception as e:
         result["sqlite"] = {"status": "error", "message": str(e)}
         result["status"] = "degraded"

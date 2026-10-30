@@ -34,9 +34,24 @@ if not exist data\law_data.db (
 )
 
 set LAW_HOST=127.0.0.1
-set LAW_PORT=8001
 if not defined LAW_API_ENFORCE set LAW_API_ENFORCE=0
 
-start "" http://127.0.0.1:8001
-.venv\Scripts\python -m uvicorn server.law_search_service:app --host 127.0.0.1 --port 8001
+rem 8001 被占用时顺延，避免「端口已占用」直接起不来
+set LAW_PORT=8001
+:findport
+netstat -ano | findstr /R /C:"TCP.*:%LAW_PORT% .*LISTENING" >nul 2>nul
+if errorlevel 1 goto portok
+if %LAW_PORT% GEQ 8010 goto portok
+set /a LAW_PORT=%LAW_PORT%+1
+goto findport
+:portok
+
+echo.
+echo 本地查询界面：http://127.0.0.1:%LAW_PORT%
+echo 关掉这个窗口即停止服务。
+echo.
+
+rem 延迟 3 秒再开浏览器，等服务起来
+start /min powershell -NoProfile -Command "Start-Sleep 3; Start-Process 'http://127.0.0.1:%LAW_PORT%'"
+.venv\Scripts\python -m uvicorn server.law_search_service:app --host 127.0.0.1 --port %LAW_PORT%
 pause

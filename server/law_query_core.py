@@ -24,9 +24,11 @@ import sqlite3
 # 中文数字与条号解析
 # ============================================================
 
-_CN_DIGIT_MAP = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+_CN_DIGIT_MAP = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
                  "六": 6, "七": 7, "八": 8, "九": 9}
-_CN_UNIT_MAP = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+# 「亿」必须收进来：不收的话「第八十五亿条」会被解析成第八十五条，
+# 引文核验就会把一个不存在的条号判成「通过」——这类假阳性比查不到危险得多。
+_CN_UNIT_MAP = {"十": 10, "百": 100, "千": 1000, "万": 10000, "亿": 100000000}
 
 
 def chinese_to_arabic(text: str) -> int:
@@ -50,7 +52,11 @@ def parse_article_number(text: str) -> int:
         return int(text)
     match = re.search(r"第?([\u4e00-\u9fa5]+)条?", text)
     if match:
-        return chinese_to_arabic(match.group(1))
+        # 解析不出数（如「第82条」里组到的是「第」）时不能直接返回 0，
+        # 要让它继续往阿拉伯数字那条路走，否则「第82条」会被判成条号 0。
+        value = chinese_to_arabic(match.group(1))
+        if value:
+            return value
     match = re.search(r"\d+", text)
     if match:
         return int(match.group(0))

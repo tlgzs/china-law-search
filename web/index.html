@@ -3,16 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>中国法律法规检索</title>
+<title>壹律法条 · 本地法规检索</title>
 <style>
   :root{
     --navy:#17293F; --brass:#B7791F; --ok:#2F855A; --danger:#C53030;
     --bg:#F5F7FA; --line:#E2E8F0; --muted:#5D6B7A; --card:#FFFFFF;
   }
   *{box-sizing:border-box}
+  html,body{height:100%}
   body{margin:0;background:var(--bg);color:var(--navy);
        font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-       font-size:14px;line-height:1.7;-webkit-font-smoothing:antialiased}
+       font-size:14px;line-height:1.7;-webkit-font-smoothing:antialiased;
+       display:flex;flex-direction:column;min-height:100vh}
+  main{flex:1 0 auto;width:100%}
+  footer{flex-shrink:0;margin-top:auto}
   header{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
   .bar{max-width:980px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
   .brand{font-size:16px;font-weight:600;letter-spacing:.02em}
@@ -66,13 +70,24 @@
   footer{max-width:980px;margin:0 auto;padding:0 20px 40px;color:var(--muted);font-size:12px}
   .banner{display:none;background:#FDF3DC;border:1px solid #F0DCA8;border-radius:10px;padding:12px 14px;margin-bottom:16px}
   .banner input{width:280px}
+  /* 空状态引导 */
+  .guide{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:26px 24px;margin-top:20px}
+  .guide h2{margin:0 0 6px;font-size:15px;font-weight:600}
+  .guide p{margin:0 0 16px;color:var(--muted);font-size:13px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{border:1px solid var(--line);background:#FBFCFE;color:#2C3A4B;border-radius:999px;
+        padding:6px 14px;font-size:13px;cursor:pointer;transition:.15s}
+  .chip:hover{border-color:var(--brass);color:var(--brass);background:#FFFBF2}
+  .guide .foot-note{margin:16px 0 0;font-size:12px;color:var(--muted);line-height:1.8}
+  .guide .foot-note b{color:#2C3A4B;font-weight:500}
+  .timing{color:var(--muted);font-size:12px;margin:0 0 10px;display:none}
   @media (max-width:640px){ .bar{padding:12px 14px} main{padding:16px 14px 60px} #artNum,#artSuffix{width:100%} }
 </style>
 </head>
 <body>
 <header>
   <div class="bar">
-    <div class="brand">中国法律法规检索
+    <div class="brand">壹律法条
       <small>本地法规库 · 条文检索与引文核验</small>
     </div>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">检测服务中…</span></div>
@@ -107,6 +122,26 @@
       <label class="chk" style="margin-left:12px">
         <input type="checkbox" id="withHistory"> 含已被修订的旧版本条文
       </label>
+    </div>
+    <div class="timing" id="timing"></div>
+    <div class="guide" id="guide">
+      <h2>直接搜法条原文，或者按条号精确取</h2>
+      <p>下面是几组常用查询，点一下就搜。也可以自己输入关键词，多个词用空格分开。</p>
+      <div class="chips">
+        <span class="chip" data-q="二倍工资">二倍工资</span>
+        <span class="chip" data-q="经济补偿">经济补偿</span>
+        <span class="chip" data-q="竞业限制">竞业限制</span>
+        <span class="chip" data-q="工伤认定">工伤认定</span>
+        <span class="chip" data-q="诉讼时效">诉讼时效</span>
+        <span class="chip" data-q="违约金">违约金</span>
+        <span class="chip" data-q="举证责任">举证责任</span>
+        <span class="chip" data-q="善意取得">善意取得</span>
+      </div>
+      <p class="foot-note">
+        <b>检索是字面匹配，不是问答。</b>「老板不给钱怎么办」这种整句查不到东西，
+        换成「拖欠劳动报酬」再搜。<b>两个字的词</b>（工伤、欠薪）召回不全，建议扩成
+        「工伤认定」「拖欠工资」这类四字以上说法。
+      </p>
     </div>
     <div class="list" id="results"></div>
   </section>
@@ -196,8 +231,10 @@ async function loadStatus() {
     const eff = h.sqlite && (h.sqlite.effective || h.sqlite.count);
     const n = eff ? eff.toLocaleString() : "—";
     $("#statusText").textContent = "服务正常 · 现行有效法条 " + n + " 条";
-    $("#foot").textContent = "本地法规库 · 现行有效法条 " + n + " 条 ｜ 向量检索：" +
-      (h.chromadb && h.chromadb.status === "ok" ? "已启用" : "未启用（使用全文检索）") +
+    $("#foot").textContent = "本地法规库 · 现行有效法条 " + n + " 条 ｜ 数据版本：" +
+      ((h.sqlite && h.sqlite.corpus_version) || "未知") +
+      " ｜ 检索方式：" +
+      (h.chromadb && h.chromadb.status === "ok" ? "向量 + 全文" : "全文检索") +
       " ｜ 数据来源：国家法律法规数据库（flk.npc.gov.cn）";
   } catch (e) {
     $("#statusText").textContent = "服务未就绪";
@@ -230,22 +267,43 @@ async function search() {
   const q = $("#q").value.trim();
   if (!q) return;
   const box = $("#results");
+  const t0 = performance.now();
+  $("#guide").style.display = "none";
+  $("#timing").style.display = "none";
   box.innerHTML = '<div class="empty">检索中…</div>';
   const params = new URLSearchParams({q, k: "20"});
   if ($("#type").value) params.set("type", $("#type").value);
   if ($("#withHistory").checked) params.set("include_history", "true");
   try {
     const data = await api("/api/law/search?" + params.toString());
+    const cost = ((performance.now() - t0) / 1000).toFixed(2);
     if (!data.items || !data.items.length) {
-      box.innerHTML = '<div class="empty">没有找到相关条文，换个说法试试（例如去掉口语词，用「经济补偿」代替「赔钱」）。</div>';
+      const hasSpace = /\s/.test(q);
+      box.innerHTML = '<div class="empty">没有找到相关条文。<br>'
+        + (q.length >= 6 && !hasSpace
+            ? '这个查询有点长，字面匹配容易落空——拆成两个词分别搜，例如「<b>'
+              + esc(q.slice(0, 2)) + '</b> <b>' + esc(q.slice(-2)) + '</b>」。'
+            : '换个说法试试：去掉口语词，用四字以上的法言法语，例如「经济补偿」代替「赔钱」。')
+        + '</div>';
+      $("#timing").textContent = "用时 " + cost + " 秒";
+      $("#timing").style.display = "block";
       return;
     }
     box.innerHTML = data.items.map((it, i) => itemHtml(it, q, i)).join("");
     box.querySelectorAll(".item").forEach(el => el.addEventListener("click", () => el.classList.toggle("open")));
+    $("#timing").textContent = "共 " + (data.total != null ? data.total : data.items.length)
+      + " 条 · 用时 " + cost + " 秒";
+    $("#timing").style.display = "block";
   } catch (e) {
     box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }
 }
+
+// 常用查询：点一下即搜
+document.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => {
+  $("#q").value = c.dataset.q;
+  search();
+}));
 
 async function lookup() {
   const lawName = $("#lawName").value.trim();
@@ -289,13 +347,29 @@ async function lookup() {
   }
 }
 
+// 一行里写多条并列引文时拆开发送：「《劳动合同法》第八十二条、第八十七条」
+// 后端只解析第一条，不拆的话后一条会被静默丢掉、结果仍显示「通过」。
+function splitCitations(line) {
+  const parts = line.split(/[、；;]/).map(s => s.trim()).filter(Boolean);
+  if (parts.length <= 1) return [line];
+  const lawMatch = line.match(/[《]([^》]+)[》]/);
+  const law = lawMatch ? lawMatch[1] : "";
+  return parts.map((p, i) => {
+    if (i > 0 && law && !p.includes("《")) return "《" + law + "》" + p.replace(/^第?/, "第");
+    return p;
+  });
+}
+
 async function verify() {
   const lines = $("#citations").value.split("\n").map(s => s.trim()).filter(Boolean);
   const out = $("#verifyOut");
   if (!lines.length) { out.innerHTML = '<div class="empty">先粘贴要核验的引文</div>'; return; }
-  out.innerHTML = '<div class="empty">核验中…</div>';
+  // 展开成扁平列表，并记住每条来自原始第几行
+  const flat = [];
+  lines.forEach((line, li) => splitCitations(line).forEach(c => flat.push({c, li})));
+  out.innerHTML = '<div class="empty">核验中…（共 ' + flat.length + ' 条）</div>';
   try {
-    const data = await api("/api/law/verify", {method: "POST", body: JSON.stringify({citations: lines})});
+    const data = await api("/api/law/verify", {method: "POST", body: JSON.stringify({citations: flat.map(x => x.c)})});
     const rows = data.results.map((r, i) => {
       const ok = r.verified;
       let note = "";
@@ -305,7 +379,7 @@ async function verify() {
       else if (r.is_principle_clause) note = "原则性条款，需结合具体条文适用";
       else note = "与库内条文一致";
       return `<tr>
-        <td>${esc(lines[i])}</td>
+        <td>${esc(flat[i] ? flat[i].c : "")}</td>
         <td class="${ok ? "yes" : "no"}">${ok ? "通过" : "未通过"}</td>
         <td>${esc(r.law_name || "—")} ${esc(r.article_number || "")}</td>
         <td>${esc(r.status === "effective" ? "现行有效" : (r.status || "—"))}</td>
@@ -313,7 +387,9 @@ async function verify() {
         <td>${note}</td>
       </tr>`;
     }).join("");
-    out.innerHTML = `<table><thead><tr><th>引文</th><th>结果</th><th>库内匹配</th><th>状态</th><th>施行日期</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>`;
+    const passed = data.results.filter(r => r.verified).length;
+    const head = `<p class="timing" style="display:block;margin:14px 0 0">共 ${data.results.length} 条，通过 ${passed} 条，未通过 ${data.results.length - passed} 条</p>`;
+    out.innerHTML = head + `<table><thead><tr><th>引文</th><th>结果</th><th>库内匹配</th><th>状态</th><th>施行日期</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>`;
   } catch (e) {
     out.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }
