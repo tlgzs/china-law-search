@@ -1,10 +1,12 @@
-# China Law Search API — 中国法律法规检索
+# 壹律法条 · China Law Search
 
 把国家法律法规数据库（flk.npc.gov.cn）的条文落到本地，用一个 SQLite 文件 + 一个 FastAPI 服务，
 给律师和法务提供**可离线、可自建、可增量更新**的法条检索与引文核验能力。
 
-三种用法，按需要选：
+四种用法，按需要选：
 
+- **接进 agent（MCP）**：WorkBuddy、Trae、ZCode、Claude Code 等直接查法条，
+  用条文支撑结论前自动核验真假与时效。
 - **本地查询界面**：双击启动脚本，浏览器打开就能搜法条、按条号定位、批量核验引文。
 - **HTTP API**：接进自己的办案系统、文书工具、AI 工作流。
 - **自建数据库**：用内置流水线把官方 Markdown 解析入库，或按增量包持续更新。
@@ -16,6 +18,7 @@
 | 法条检索 | 关键词检索，FTS5 全文索引 + bm25 相关性排序；装向量库后可切换语义检索 |
 | 条文定位 | 按「法律名称 + 条号」直接取条文，支持「第八十二条之一」这类增补条 |
 | 引文核验 | 批量提交引文，逐条核对是否存在、是否现行有效、是否已被修订、是否原则性条款 |
+| agent 接入 | 内置 MCP 服务器（stdio，零第三方依赖），四个只读工具，见 [`mcp/README.md`](mcp/README.md) |
 | 版本保留 | 被修订的旧条文不删除，标记为已失效；默认不返回，需要时显式开启 |
 | 增量更新 | 下载新版 Word/Markdown → 生成变更报告 → 人工确认 → 写库，全程可审计 |
 | 离线运行 | 检索不依赖任何外部接口，内网、无网环境可用 |
@@ -76,6 +79,33 @@ python tools/apply_delta.py --delta delta-2026.10.30.json --db data/law_data.db
 - **引文核验**：一行一条引文，例如 `《劳动合同法》第八十二条`，一次核完。
 
 界面完全离线，不加载任何外部资源。
+
+## 接入 agent（MCP）
+
+不想复制粘贴，让 agent 自己查。内置一个 MCP 服务器，四个只读工具：
+
+| 工具 | 作用 |
+|---|---|
+| `get_article` | 法名 + 条号 → 逐字原文（支持「之一」增补条） |
+| `get_law` | 法名 → 章节目录 + 版本沿革 + 条文 |
+| `search_articles` | 多关键词 → 候选条文（字面匹配，不做语义理解） |
+| `verify_citation` | 一段引文 → 是否逐字命中、命中的是否现行版本 |
+
+```bash
+python3 mcp/install.py --list              # 看本机装了哪些客户端
+python3 mcp/install.py --all --yes         # 写入（默认只预览，加 --yes 才落盘）
+python3 mcp/server.py --selftest           # 装完自检
+```
+
+安装器覆盖 WorkBuddy、Trae、ZCode、Claude Code、Codex、Cursor、Cline、Windsurf，
+自动探测配置位置、备份原文件、合并写入（不动别人已有的 MCP 条目）。
+
+**两个必须知道的前提**：
+
+- 写文件不等于生效。WorkBuddy 要在连接器页点「信任」，Trae / Cursor 要重启，
+  这些脚本做不到，逐步说明见 [`mcp/README.md`](mcp/README.md)。
+- MCP 直连 SQLite，**不需要先启动服务**——agent 自己拉起子进程，用完即退。
+  这也是它只要 Python 标准库、不装 `mcp` SDK 的原因。
 
 ## API
 
@@ -209,7 +239,13 @@ gh release create data-2026.10.30 dist/*.zst dist/manifest.json --title "数据 
 ## 目录结构
 
 ```
-server/law_search_service.py   HTTP 服务（检索 / 定位 / 核验 / 统计）
+server/
+  law_query_core.py            法条查询内核（纯 sqlite3，HTTP 与 MCP 共用同一套规则）
+  law_search_service.py        HTTP 服务（检索 / 定位 / 核验 / 统计）
+mcp/
+  server.py                    MCP 服务器（stdio，四个只读工具，零第三方依赖）
+  install.py                   各客户端安装器（探测 / 备份 / 合并写入 / 移除）
+  README.md                    各家客户端的配置位置与坑
 web/index.html                 本地查询界面（单文件，零外部依赖）
 ingest/                        建库流水线
   schema.py                    表结构与迁移（幂等，老库自动补列）
@@ -225,6 +261,10 @@ tools/
   make_release.py              打包发版资产
 docs/UPDATE-PIPELINE.md        更新流水线的设计说明
 ```
+
+**为什么单抽一个 `law_query_core.py`**：条号「之一」与法规名归一这两条规则，
+一旦网页端和 MCP 端各写一份，迟早走岔——表现为「网页查得到、agent 查不到」。
+而这种错在 agent 场景下不会有人复核，代价比网页高得多。所以只允许一份实现。
 
 ## 配置
 

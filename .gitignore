@@ -23,3 +23,6 @@ venv/
 # 系统
 .DS_Store
 Thumbs.db
+
+# MCP 安装器写入客户端配置前生成的备份
+*.bak-*

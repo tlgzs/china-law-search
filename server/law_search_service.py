@@ -62,6 +62,38 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 logger = logging.getLogger("law_search")
 
 # ============================================================
+# 法条查询内核（唯一实现，MCP 服务器共用同一份）
+# ============================================================
+# 条号「之一」、法规名归一这类规则只允许有一份实现：
+# 网页与 agent 各写一份，迟早走岔，而 agent 查错法条不会有人复核。
+try:  # 以 `uvicorn server.law_search_service:app` 启动
+    from server.law_query_core import (  # noqa: PLC0415
+        _COLS,
+        LawStore,
+        _build_verify_result,
+        chinese_to_arabic,
+        match_terms as _match_terms,
+        normalize_law_name,
+        parse_article_number,
+        parse_article_suffix,
+        parse_citation_string as _parse_citation_string,
+        row_to_item as _row_to_item,
+    )
+except ImportError:  # 以 `python server/law_search_service.py` 直接启动
+    from law_query_core import (  # type: ignore[no-redef]  # noqa: PLC0415
+        _COLS,
+        LawStore,
+        _build_verify_result,
+        chinese_to_arabic,
+        match_terms as _match_terms,
+        normalize_law_name,
+        parse_article_number,
+        parse_article_suffix,
+        parse_citation_string as _parse_citation_string,
+        row_to_item as _row_to_item,
+    )
+
+# ============================================================
 # 配置（环境变量 > 默认值；默认相对本项目 data/ 目录）
 # ============================================================
 
@@ -262,58 +294,10 @@ def log_call(
 
 
 # ============================================================
-# 中文数字转换
+# 条号解析 / 法名归一 —— 实现见 server/law_query_core.py
 # ============================================================
 
-_CN_DIGIT_MAP = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-                  "六": 6, "七": 7, "八": 8, "九": 9}
-_CN_UNIT_MAP = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 
-
-def chinese_to_arabic(text: str) -> int:
-    result = 0
-    temp = 0
-    for char in text:
-        if char in _CN_DIGIT_MAP:
-            temp = _CN_DIGIT_MAP[char]
-        elif char in _CN_UNIT_MAP:
-            if temp == 0:
-                temp = 1
-            result += temp * _CN_UNIT_MAP[char]
-            temp = 0
-    return result + temp
-
-
-def parse_article_number(text: str) -> int:
-    """从条号文本中解析阿拉伯数字，支持中文和阿拉伯数字。"""
-    text = text.strip()
-    if text.isdigit():
-        return int(text)
-    match = re.search(r"第?([\u4e00-\u9fa5]+)条?", text)
-    if match:
-        return chinese_to_arabic(match.group(1))
-    match = re.search(r"\d+", text)
-    if match:
-        return int(match.group(0))
-    return 0
-
-
-_ARTICLE_SUFFIX_RE = re.compile(r"第[\u4e00-\u9fa5\d]+条\s*(之[\u4e00-\u9fa5]{1,3})")
-
-
-def parse_article_suffix(text: str) -> str:
-    """提取「之一/之二」增补条后缀，无则返回空串。
-
-    刑法修正案类条文写作「第一百三十三条之一」，与「第一百三十三条」
-    是两个独立条文，必须靠后缀区分，否则会串条。
-    """
-    m = _ARTICLE_SUFFIX_RE.search(text or "")
-    return m.group(1) if m else ""
-
-
-def normalize_law_name(name: str) -> str:
-    """标准化法律名称，去除书名号。"""
-    return name.strip().replace("《", "").replace("》", "")
 
 
 # ============================================================
@@ -327,6 +311,11 @@ def get_db() -> sqlite3.Connection:
 
 
 db = get_db()
+
+
+def _store() -> LawStore:
+    """当前连接上的查询内核（轻对象，按需创建，不缓存连接状态）。"""
+    return LawStore(db)
 
 
 def _ensure_db_compatible() -> None:
@@ -552,125 +541,14 @@ def _search_via_chromadb(q: str, k: int, law_type: str | None,
     return items
 
 
-def _row_to_item(r, score: float = 0.0) -> dict:
-    """把一行法条记录转成 API 返回结构（含时效状态，供前端标注旧版本）。"""
-    status = r["status"] or "effective"
-    return {
-        "law_name": r["law_name"],
-        "law_type": r["law_type"],
-        "law_type_label": r["law_type_label"],
-        "article_number": r["article_number"],
-        "article_num": r["article_number_num"],
-        "article_suffix": r["article_suffix"] or "",
-        "chapter": r["chapter"],
-        "section": r["section"],
-        "content": r["content"],
-        "publish_date": r["publish_date"] or "",
-        "effective_date": r["effective_date"] or "",
-        "status": status,
-        "is_repealed": status == "repealed",
-        "repeal_date": r["repeal_date"] or "",
-        "replaced_by": r["replaced_by"] or "",
-        "score": score,
-    }
+# _row_to_item / _COLS 已由 server/law_query_core.py 提供
 
-
-_COLS = """a.law_name, a.law_type, a.law_type_label, a.article_number,
-           a.article_number_num, a.article_suffix, a.chapter, a.section, a.content,
-           a.publish_date, a.effective_date, a.status, a.repeal_date, a.replaced_by"""
-
-
-def _fts_query(q: str) -> str | None:
-    """把用户输入转成 FTS5 trigram 查询串。
-
-    trigram 分词器按 3 字滑动窗口切词，短于 3 字的查询无法命中，
-    且未加引号时特殊符号会被当成语法 → 统一加双引号并转义。
-    """
-    cleaned = q.strip().replace('"', '""')
-    if len(cleaned) < 3:
-        return None
-    return f'"{cleaned}"'
-
-
-def _match_terms(q: str, size: int = 2, limit: int = 8) -> list[str]:
-    """把查询切成 2 字滑动片段，用于「命中多数即召回」的模糊匹配。
-
-    「未签书面劳动合同」→ 未签/签书/书面/劳动/合同
-    中文没有空格、也没有分词，纯字面匹配会漏掉「未与劳动者订立书面劳动合同」这类改写。
-    """
-    s = re.sub(r"\s+", "", q or "")
-    if len(s) < size * 2:
-        return []
-    grams: list[str] = []
-    for i in range(0, len(s) - size + 1):
-        g = s[i:i + size]
-        if g not in grams:
-            grams.append(g)
-    return grams[:limit]
 
 
 def _search_via_sqlite(q: str, k: int, law_type: str | None,
                        include_history: bool = False) -> list[dict]:
-    """SQLite 全文检索：优先 FTS5(trigram) + bm25 排序，失败或零命中再退化 LIKE。"""
-    type_filter = ""
-    params: list[Any] = []
-    if law_type:
-        type_filter += " AND a.law_type = ?"
-        params.append(law_type)
-    if not include_history:
-        type_filter += " AND (a.status IS NULL OR a.status != 'repealed')"
-
-    # 1) FTS5 检索（有 bm25 相关性排序）
-    fts = _fts_query(q)
-    if fts:
-        try:
-            rows = db.execute(
-                f"""SELECT {_COLS}, bm25(law_articles_fts) AS rank
-                    FROM law_articles_fts
-                    JOIN law_articles a ON a.id = law_articles_fts.rowid
-                    WHERE law_articles_fts MATCH ?{type_filter}
-                    ORDER BY rank
-                    LIMIT ?""",
-                (fts, *params, k),
-            ).fetchall()
-            if rows:
-                # bm25 越小越相关，转成正向 0~1 分数便于前端展示
-                return [_row_to_item(r, round(1.0 / (1.0 + abs(r["rank"])), 4)) for r in rows]
-        except Exception as e:  # noqa: BLE001
-            logger.warning("FTS 检索失败，改用 LIKE：%s", e)
-
-    # 2) LIKE 兜底（短查询、FTS 未建、零命中）
-    rows = db.execute(
-        f"""SELECT {_COLS}
-            FROM law_articles a
-            WHERE (a.content LIKE ? OR a.article LIKE ?){type_filter}
-            LIMIT ?""",
-        (f"%{q}%", f"%{q}%", *params, k),
-    ).fetchall()
-    if rows:
-        return [_row_to_item(r) for r in rows]
-
-    # 3) 片段兜底：中文没有空格，用户写「二倍工资」而原文是「二倍的工资」时，
-    #    字面连续匹配必然落空。这里拆成 2 字片段，命中多数片段即召回，
-    #    按命中数排序——recision 让一点，换可用性。
-    terms = _match_terms(q)
-    if terms:
-        n = len(terms)
-        need = max(2, math.ceil(n * 0.6)) if n > 1 else 1
-        score_sql = " + ".join("(a.content LIKE ?)" for _ in terms)
-        rows = db.execute(
-            f"""SELECT * FROM (
-                    SELECT {_COLS}, {score_sql} AS hits
-                    FROM law_articles a
-                    WHERE 1 = 1{type_filter}
-                ) WHERE hits >= ?
-                ORDER BY hits DESC, LENGTH(content) ASC
-                LIMIT ?""",
-            (*[f"%{x}%" for x in terms], *params, need, k),
-        ).fetchall()
-        return [_row_to_item(r, round(r["hits"] / n, 4)) for r in rows]
-
-    return []
+    """SQLite 三级检索 — 实现见 server/law_query_core.py:LawStore.search。"""
+    return _store().search(q, k=k, law_type=law_type, include_history=include_history)
 
 # ============================================================
 # API: 精确条号查找
@@ -895,70 +773,10 @@ async def verify_law_citations(
     }
 
 
-def _parse_citation_string(citation: str) -> dict:
-    """解析字符串引用。
-
-    支持：《劳动合同法》第八十二条 ｜ 劳动合同法第82条 ｜ 刑法第一百三十三条之一
-    """
-    text = (citation or "").strip()
-    suffix = parse_article_suffix(text)
-
-    m = re.match(r"[《]?(.+?)[》]?\s*第([\u4e00-\u9fa5]+|\d+)条", text)
-    if m:
-        num_text = m.group(2)
-        num = int(num_text) if num_text.isdigit() else chinese_to_arabic(num_text)
-        return {
-            "law_name": m.group(1).strip(),
-            "article_number": f"第{num_text}条{suffix}",
-            "article_num": num,
-            "article_suffix": suffix,
-        }
-
-    # 兜底：只给数字，例如 "劳动合同法 82"
-    num_match = re.search(r"(\d+)", text)
-    if num_match:
-        return {
-            "law_name": text.split(num_match.group(1))[0]
-                        .replace("《", "").replace("》", "").replace("第", "").strip(),
-            "article_number": f"第{num_match.group(1)}条{suffix}",
-            "article_num": int(num_match.group(1)),
-            "article_suffix": suffix,
-        }
-
-    return {"law_name": "", "article_number": "", "article_num": 0, "article_suffix": ""}
 
 
-def _build_verify_result(
-    law_name: str,
-    article_number: str,
-    verified: bool,
-    article_suffix: str = "",
-    actual_content: str | None = None,
-    error: str | None = None,
-    status: str | None = None,
-    effective_date: str | None = None,
-    repeal_date: str | None = None,
-    repeal_reason: str | None = None,
-    replaced_by: str | None = None,
-    is_principle_clause: bool = False,
-    has_multiple_versions: bool = False,
-) -> dict:
-    """构建校验结果，确保所有字段都返回。"""
-    return {
-        "law_name": law_name,
-        "article_number": article_number,
-        "article_suffix": article_suffix,
-        "verified": verified,
-        "actual_content": actual_content,
-        "error": error,
-        "status": status,
-        "effective_date": effective_date,
-        "repeal_date": repeal_date,
-        "repeal_reason": repeal_reason,
-        "replaced_by": replaced_by,
-        "is_principle_clause": is_principle_clause,
-        "has_multiple_versions": has_multiple_versions,
-    }
+
+
 
 
 # ============================================================
