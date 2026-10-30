@@ -1,0 +1,14 @@
+# 向量语义检索（可选）。
+#   python3 -m pip install -r requirements-vector.txt
+#
+# 不装也能正常用：服务检测不到向量库时自动降级为 FTS5 全文检索，
+# 检索、条文定位、引文核验三项功能都不受影响，只是不做语义相似匹配。
+#
+# 代价提醒：sentence-transformers 会连带安装 torch，磁盘占用 2 GB 以上。
+# 只想查条文的人不需要这一层。
+
+-r requirements.txt
+
+chromadb>=0.5
+sentence-transformers>=2.7
+torch>=2.2

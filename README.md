@@ -3,11 +3,14 @@
 把国家法律法规数据库（flk.npc.gov.cn）的条文落到本地，用一个 SQLite 文件 + 一个 FastAPI 服务，
 给律师和法务提供**可离线、可自建、可增量更新**的法条检索与引文核验能力。
 
+**代码在这里，数据在 Release。** 全量库解压后 2.3 GB，不进 git，
+用 `tools/fetch_data.py` 一条命令下载。
+
 四种用法，按需要选：
 
 - **接进 agent（MCP）**：WorkBuddy、Trae、ZCode、Claude Code 等直接查法条，
-  用条文支撑结论前自动核验真假与时效。
-- **本地查询界面**：双击启动脚本，浏览器打开就能搜法条、按条号定位、批量核验引文。
+  用条文支撑结论前自动核验真假与时效。**零第三方依赖**，是最快的上手方式。
+- **本地查询界面**：运行启动脚本，浏览器打开就能搜法条、按条号定位、批量核验引文。
 - **HTTP API**：接进自己的办案系统、文书工具、AI 工作流。
 - **自建数据库**：用内置流水线把官方 Markdown 解析入库，或按增量包持续更新。
 
@@ -25,49 +28,116 @@
 
 ## 快速开始
 
-### 方式一：双击启动（推荐给不写代码的用户）
+> 下文命令写作 `python3`。Windows 上如果提示找不到该命令，换成 `python`。
 
-1. 安装 Python 3.10 或更高版本（Windows 安装时勾选 `Add Python to PATH`）。
-2. 从 Releases 下载数据包，解压后把 `law_data.db` 放进 `data/` 目录。
-3. macOS 双击 `启动.command`；Windows 双击 `启动.bat`。
-
-首次运行会自动创建虚拟环境并安装依赖（约 1 分钟），随后自动打开
-`http://127.0.0.1:8001`。数据包缺失时服务仍会启动，只是查不到内容。
-
-### 方式二：命令行
+### 一、接进 agent（不需装任何依赖）
 
 ```bash
-pip install fastapi "uvicorn[standard]"
-python -m uvicorn server.law_search_service:app --host 127.0.0.1 --port 8001
+git clone https://github.com/<owner>/china-law-search.git
+cd china-law-search
+python3 tools/fetch_data.py            # 下载数据包并校验
+python3 mcp/install.py --all --yes     # 写入本机 agent 配置
 ```
 
-或直接 `./start.sh`。
+MCP 服务器只用 Python 标准库，**不需要 `pip install` 任何东西**，
+macOS 自带的 Python 3.9 就能跑。装完在 WorkBuddy 的连接器页点「信任」，
+Trae / Cursor 重启客户端即生效。四个工具的用法见 [`mcp/README.md`](mcp/README.md)。
 
-### 方式三：Docker
+跑通验证：
+
+```bash
+python3 mcp/server.py --selftest
+```
+
+### 二、本地查询界面
+
+需要三个 Web 依赖（`fastapi` / `uvicorn` / `pydantic`）：
+
+```bash
+python3 -m pip install -r requirements.txt
+./start.sh              # macOS / Linux 命令行
+启动.command            # macOS 双击
+启动.bat                # Windows 双击
+```
+
+脚本会自动建虚拟环境、装依赖、起服务并打开 `http://127.0.0.1:8001`。
+也可以手动起：`python3 -m uvicorn server.law_search_service:app --port 8001`。
+
+语义检索是**可选**的，要另装 `requirements-vector.txt`（会连带 torch，2 GB 以上）。
+不装照样能用：服务检测不到向量库时自动降级为 FTS5 全文检索，
+检索、条文定位、引文核验三项功能都不受影响。
+
+### 三、Docker
 
 ```bash
 docker compose up -d
 ```
 
-数据目录 `./data` 挂载进容器，把 `law_data.db` 放进去即可。
+数据目录 `./data` 挂载进容器，先跑一次 `python3 tools/fetch_data.py`，或把下载好的库放进去。
+
+### 数据不在仓库里
+
+全量库解压后 2.3 GB，超过 git 单文件上限，所以**仓库只放代码，数据走 Release**。
+`tools/fetch_data.py` 一条命令完成下载、校验、解压、就位：
+
+```bash
+python3 tools/fetch_data.py            # 没库就下全量；有库则比对版本，有新才下
+python3 tools/fetch_data.py --check    # 只看版本，不下载
+python3 tools/fetch_data.py --full     # 强制重下全量
+```
+
+下载的东西不会被盲目覆盖：先解压到临时文件，校验 sha256 与数据库完整性，
+通过后才替换，旧库留一份 `.bak`。
+
+**网络下不动 GitHub 时**，用浏览器手动下载 Release 附件，再：
+
+```bash
+python3 tools/fetch_data.py --from-file 下载到的 law_data-xxx.db.zst
+```
+
+`--from-file` 也认 `.gz`。两种格式内容一致，`.gz` 略大但解压不需要额外装任何东西。
 
 ## 数据从哪来
 
 法规文本来自**国家法律法规数据库**（`flk.npc.gov.cn`）公开下载的 Markdown 文件，
 属官方文件，可自由使用与再分发。
 
-数据不放进代码仓库（体积原因），以 GitHub Release 附件发布：
+**这个仓库不提供任何自动采集代码**，也不建议任何人对该站点做批量抓取——
+站方 `robots.txt` 明确禁止自动化采集。数据包由维护者线下更新后发布，
+使用者只从本项目 Release 下载成品。
 
-- `law_data-<版本>.db.zst`：全量库，新用户首次下载
-- `delta-<版本>.json.zst`：增量变更集，老用户只下这个
-- `manifest.json`：版本号、校验和、schema 版本、变更摘要
+### 覆盖范围
 
-数据包体积较大（数百 MB 级），下载后解压到 `data/` 目录。
-老用户升级不必重新下载全量：
+| 分类 | 现行法规 | 说明 |
+|---|---|---|
+| 地方性法规 | 15,324 部 | 省级 / 设区的市 / 自治州 / 自治县 / 经济特区 |
+| 行政法规 | 584 部 | — |
+| 司法解释 | 362 部 | — |
+| 法律 | 302 部 | 与官方公布的法律目录数量一致 |
+| 法律解释 / 监察法规 / 宪法 | 12 / 2 / 1 部 | — |
 
-```bash
-python tools/apply_delta.py --delta delta-2026.10.30.json --db data/law_data.db
-```
+合计 **16,587 部法规 / 698,067 条现行条文**，另含 329,404 条历史条文
+（标 `repealed` + 失效日期，默认不返回）。
+
+**不含以下内容**，因为官方库本身不收录：
+
+- 部门规章（各部委令）
+- 地方政府规章（省市政府令）
+- 军事法规、党内法规、国际条约
+
+查「建设工程」「食品经营」这类主题时查不到住建部、市场监管总局的规章，是数据源边界，
+不是库坏了。判断某个引用能否在这里核验，先看它是不是上述六类之一。
+
+### 版本与校验
+
+数据以 GitHub Release 附件发布，tag 形如 `data-2026.10.30`：
+
+- `law_data-<版本>.db.zst` / `.gz`：全量库，两种压缩格式内容一致
+- `delta-<版本>.json.zst` / `.gz`：增量变更集，只含变的法规
+- `manifest.json`：版本号、条数、`db_sha256`、各资产的 sha256 与适用版本
+
+每个响应都带 `data_snapshot.corpus_version`，标明这批数据截至哪一版。
+**数据是快照，不是实时**：涉及时效敏感的案件，请以官方发布文本复核。
 
 ## 本地查询界面
 
@@ -186,23 +256,23 @@ curl -X POST http://127.0.0.1:8001/api/law/verify \
 
 ## 自己建库
 
-`ingest/` 是一条完整流水线：
+`ingest/` 是一条完整流水线。解析与建库只依赖标准库，**不需要装任何包**；
+只有第 3 步建向量索引才需要 `pip install -r requirements-ingest.txt`。
 
 ```bash
 # 1) 把官方下载的 doc/docx 转成 Markdown（需要系统装 pandoc 与 libreoffice）
-python ingest/convert_docx_batch.py --input-dir ./raw --output-dir ./md
+python3 ingest/convert_docx_batch.py --input-dir ./raw --output-dir ./md
 
 # 2) 解析条号与章节，写入 SQLite（唯一真源），同时建 FTS 索引
 #    默认每部法规只取最新版本；要连历史版本一起入库加 --keep-history
-python ingest/build_sqlite_from_markdown.py --markdown-dir ./md --output-path ./data/law_data.db
+python3 ingest/build_sqlite_from_markdown.py --markdown-dir ./md --output-path ./data/law_data.db
 
 # 3) 可选：构建向量索引，启用语义检索
-python ingest/ingest_to_vectordb.py --markdown-dir ./md --db-path ./data/legal_vector_db
+python3 ingest/ingest_to_vectordb.py --markdown-dir ./md --db-path ./data/legal_vector_db
 ```
 
 **SQLite 是唯一真源，向量库只是可重建的索引。** 向量库损坏不影响数据，
-删掉重跑第 3 步即可。不装 `chromadb` 与 `sentence-transformers` 时，
-服务自动降级为全文检索，功能不受影响。
+删掉重跑第 3 步即可。不装向量依赖时，服务自动降级为全文检索，功能不受影响。
 
 ## 增量更新
 
@@ -210,12 +280,12 @@ python ingest/ingest_to_vectordb.py --markdown-dir ./md --db-path ./data/legal_v
 
 ```bash
 # 第一步：扫描 → 转换 → 解析 → 比对 → 出报告（只出报告，不写库）
-python tools/update.py --inbox inbox/
+python3 tools/update.py --inbox inbox/
 
 # 打开 reports/changes-<时间>.html 逐条看：新增条、修改条（左右对照）、删除条、元数据变更
 
 # 第二步：确认无误后写库
-python tools/update.py --apply reports/changes-<时间>.plan.json --approve
+python3 tools/update.py --apply reports/changes-<时间>.plan.json --approve
 ```
 
 设计上刻意留了一道人工闸门：**没有 `--approve` 绝不写库**。法条改动直接影响律师引用，
@@ -229,12 +299,27 @@ python tools/update.py --apply reports/changes-<时间>.plan.json --approve
 ## 发版
 
 ```bash
-# 打包全量库 + 增量包 + manifest
-python tools/make_release.py --db data/law_data.db --delta delta-2026.10.30.json --out-dir dist/
+# 打包全量库 + 增量包 + manifest（同时产出 .zst 与 .gz）
+python3 tools/make_release.py --db data/law_data.db --delta delta-2026.10.30.json --out-dir dist/
 
 # 上传为 Release（需已安装 gh 并登录）
-gh release create data-2026.10.30 dist/*.zst dist/manifest.json --title "数据 2026.10.30"
+gh release create data-2026.10.30 dist/* --title "数据 2026.10.30" --notes "法规 N 部 / 法条 N 条"
 ```
+
+两种压缩格式都要发，不是冗余：用户机器上可能既没有 `zstandard` 库也没有 `zstd` 命令，
+那时只能退回 `.gz`（`gzip` 是 Python 内置）。只发 `.zst` 会让这类用户装不上数据。
+
+### 用户侧升级
+
+升级和首次安装是同一条命令：
+
+```bash
+python3 tools/fetch_data.py
+```
+
+它读 Release 的 `manifest.json` 比对本地 `corpus_version`：已是最新就什么都不做；
+有新版且增量包正好以本地版本为起点，就只下增量；否则下全量（约 262 MB）。
+`apply_delta.py` 仍然可用，适合手工控制升级时点。
 
 ## 目录结构
 
@@ -254,6 +339,7 @@ ingest/                        建库流水线
   dedup_old_versions.py        历史版本去重
   ingest_to_vectordb.py        构建向量索引（可选）
 tools/
+  fetch_data.py                下载 / 校验 / 安装数据包（用户侧）
   update.py                    增量更新主程序（出报告 / 确认写库）
   diff_articles.py             条文级比对 + HTML 报告
   make_delta.py                生成增量包
@@ -285,9 +371,15 @@ docs/UPDATE-PIPELINE.md        更新流水线的设计说明
 
 ## 常见问题
 
-**查不到想要的条文？** 先试更短的词。检索是关键词匹配，不是问答——
-「公司不给上社保怎么办」这类整句提问，请换成「社会保险」等术语再搜。
-装向量库后会好一些，但仍不应把它当作法律咨询。
+**查不到想要的条文？** 分三种情况：
+
+1. **检索词太长**。检索是关键词匹配，不是问答——「公司不给上社保怎么办」这类整句，
+   换成「社会保险」再搜。
+2. **两字词召回不全**。FTS 索引按 3 字窗口建立，「工伤」「欠薪」这类两字词用不上索引，
+   会退化成全表匹配——约 1 秒出结果，但召回不完整。查两字概念建议走 MCP，
+   让 agent 先把它扩成「拖欠劳动报酬」这类法言法语再查。
+3. **法规本身不在库里**。本库只覆盖官方六类（见「覆盖范围」），
+   部门规章和地方政府规章不在其中。
 
 **条文和官网对不上？** 以国家法律法规数据库发布的正式文本为准。
 本项目只是把公开数据落到本地，不做任何改写。发现问题请提 issue 并注明法规名称与条号。

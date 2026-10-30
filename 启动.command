@@ -3,7 +3,7 @@
 cd "$(dirname "$0")" || exit 1
 
 echo "======================================"
-echo "  中国法律法规检索 · 本地服务启动中"
+echo "  壹律法条 · 本地法规检索服务启动中"
 echo "======================================"
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -25,8 +25,9 @@ fi
 
 if [ ! -f data/law_data.db ]; then
   echo ""
-  echo "提示：未找到 data/law_data.db"
-  echo "     请先从 GitHub Releases 下载数据包，解压后把 law_data.db 放进 data/ 目录。"
+  echo "提示：未找到数据文件 data/law_data.db"
+  echo "     运行下面这行自动下载（约 262 MB，含校验）："
+  echo "       python3 tools/fetch_data.py"
   echo "     服务仍会启动，但没有数据可查。"
   echo ""
 fi

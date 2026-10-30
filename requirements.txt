@@ -1,17 +1,10 @@
-# ---- 最小模式（仅 SQLite 检索）----
+# 最小依赖：本地查询界面 + HTTP API 只需要这三个。
+#   python3 -m pip install -r requirements.txt
+#
+# MCP 服务器（mcp/server.py）不在此列——它只用标准库，不需要装任何东西。
+# 需要语义检索时另装 requirements-vector.txt（会连带 torch，2 GB 以上）。
+# 需要自建向量库时另装 requirements-ingest.txt。
+
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6
-
-# ---- 向量语义检索（可选，不装则自动降级 FTS）----
-chromadb>=0.5
-sentence-transformers>=2.7
-torch>=2.2
-
-# ---- 数据流水线 ingest/（构建向量库时需要）----
-langchain-core>=0.2
-langchain-chroma>=0.1
-langchain-huggingface>=0.0.3
-
-# 注：ingest/convert_docx_batch.py 依赖系统工具 pandoc 与 libreoffice，
-#     仅在转换 doc/docx 原始文件时需要，请用系统包管理器安装。

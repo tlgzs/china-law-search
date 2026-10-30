@@ -1,0 +1,14 @@
+# 数据流水线的向量化部分。只有自行构建向量索引时才需要。
+#   python3 -m pip install -r requirements-ingest.txt
+#
+# 解析 Markdown、建 SQLite、建 FTS 索引这些步骤不依赖这里的任何包，
+# 只靠标准库 + requirements.txt 就能跑。
+#
+# 另注：ingest/convert_docx_batch.py 依赖系统工具 pandoc 与 libreoffice，
+#      仅在把 doc/docx 原始文件转成 Markdown 时需要，请用系统包管理器安装。
+
+-r requirements-vector.txt
+
+langchain-core>=0.2
+langchain-chroma>=0.1
+langchain-huggingface>=0.0.3

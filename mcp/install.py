@@ -403,7 +403,12 @@ def cmd_list(db_path: str | None) -> int:
     print()
     print(f"将使用的解释器：{python_command()}")
     print(f"MCP 服务器脚本：{server_script()}")
-    print(f"数据库：{db_path or '（未找到 data/law_data.db，请用 --db 指定）'}")
+    if db_path:
+        print(f"数据库：{db_path}")
+    else:
+        print("数据库：（未找到 data/law_data.db）")
+        print("  先下载数据再装，否则 agent 查不到任何条文：")
+        print("    python3 tools/fetch_data.py")
     return 0
 
 

@@ -3,9 +3,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY requirements.txt .
-# 默认只装最小依赖；需要向量检索时取消注释下一行
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic
-# RUN pip install --no-cache-dir -r requirements.txt
+# requirements.txt 只含 Web 服务需要的最小依赖。
+# 要语义检索就改用 requirements-vector.txt（体积会大很多）。
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server/ ./server/
 COPY web/ ./web/
