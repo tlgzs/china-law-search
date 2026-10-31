@@ -1,5 +1,6 @@
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """
 法规原文 SQLite 构建脚本。

@@ -141,3 +141,7 @@
   也没 `zstd` 命令的用户装不上数据。
 - `manifest.json` 增加 `db_sha256`（解压后未压缩库的哈希）与每个资产的
   `compression`、`from_version`、`to_version`，供下载端判断该下增量还是全量。
+
+---
+
+**壹律从简** · [www.yilvai.com](https://www.yilvai.com) · 作者：网络小菜鸟 · 微信：`pmfumin`

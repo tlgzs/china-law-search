@@ -1,5 +1,6 @@
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """法条查询内核 — 纯 sqlite3，不依赖 FastAPI / uvicorn。
 

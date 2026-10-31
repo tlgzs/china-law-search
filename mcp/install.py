@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """把「壹律法条」注册到各家 agent 客户端（MCP 接入）。
 

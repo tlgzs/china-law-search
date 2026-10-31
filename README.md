@@ -449,6 +449,17 @@ docs/UPDATE-PIPELINE.md        更新流水线的设计说明
 - 引文核验只回答「库里有没有这条、是否现行有效」，不判断引文是否被正确适用。
 - 条文时效以库内记录为准，数据版本日期见 `manifest.json`；涉及时效敏感的案件请自行复核。
 
+## 作者与联系
+
+**壹律从简** · 作者：网络小菜鸟
+
+- 站点：[www.yilvai.com](https://www.yilvai.com)
+- 微信：`pmfumin`
+- 问题反馈：[Issues](https://github.com/tlgzs/china-law-search/issues)
+
+装不上、跑不通、发现某部法规缺失或版本不对，都可以直接找我，
+提 issue 时附上法规名称与条号会快很多。
+
 ## 许可
 
 代码以 MIT 许可发布。法规文本源自国家法律法规数据库公开数据，按其公开使用规则使用。

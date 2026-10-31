@@ -1,5 +1,6 @@
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """
 DOCX/DOC 批量转 Markdown 脚本

@@ -1,5 +1,6 @@
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """把 lawtext/legal-data-docx 镜像里更新的法规整理成 inbox 可用的 Markdown。
 

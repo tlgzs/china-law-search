@@ -1,5 +1,6 @@
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """打包发版：全量库 + 增量包 + manifest，生成可直接上传 GitHub Releases 的资产。
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # 壹律从简  www.yilvai.com
 # 作者：网络小菜鸟
+# 微信：pmfumin
 
 """获取法条数据包：从 GitHub Release 下载 → 校验 → 解压到 data/。
 

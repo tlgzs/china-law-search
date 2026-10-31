@@ -257,3 +257,10 @@ python3 mcp/install.py --remove      # 从各客户端配置里删掉 yilv-law �
 
 然后删掉整个仓库目录即可（数据就在 `china-law-search/data/` 里，一并删掉）。
 `install.py --remove` 不会碰你自己的其他 MCP 配置。
+
+---
+
+**壹律从简** · [www.yilvai.com](https://www.yilvai.com) · 作者：网络小菜鸟 · 微信：`pmfumin`
+
+按上面排查表还是卡住，把**原样报错**发我（微信或 [Issues](https://github.com/tlgzs/china-law-search/issues)），
+别自己删库重来——数据包 660 MB，重下不值得。

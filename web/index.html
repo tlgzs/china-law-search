@@ -1,8 +1,14 @@
 <!DOCTYPE html>
+<!--
+  壹律从简  www.yilvai.com
+  作者：网络小菜鸟
+  微信：pmfumin
+-->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="网络小菜鸟">
 <title>壹律法条 · 本地法规检索</title>
 <style>
   :root{
@@ -67,7 +73,10 @@
   .full .body{font-size:14px;line-height:1.9;color:#22303F;white-space:pre-wrap}
   .full .foot{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
        color:var(--muted);font-size:12px;display:flex;gap:16px;flex-wrap:wrap}
-  footer{max-width:980px;margin:0 auto;padding:0 20px 40px;color:var(--muted);font-size:12px}
+  footer{max-width:980px;margin:0 auto;padding:0 20px 6px;color:var(--muted);font-size:12px}
+  .credit{max-width:980px;margin:0 auto;padding:0 20px 36px;color:var(--muted);
+          font-size:12px;opacity:.7}
+  .credit a{color:inherit;text-decoration:none;border-bottom:1px dotted currentColor}
   .banner{display:none;background:#FDF3DC;border:1px solid #F0DCA8;border-radius:10px;padding:12px 14px;margin-bottom:16px}
   .banner input{width:280px}
   /* 空状态引导 */
@@ -175,6 +184,7 @@
 </main>
 
 <footer id="foot">法规库状态加载中…</footer>
+<div class="credit">壹律从简　<a href="https://www.yilvai.com" target="_blank" rel="noopener">www.yilvai.com</a>　·　微信 pmfumin</div>
 
 <script>
 const $ = (s) => document.querySelector(s);

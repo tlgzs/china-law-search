@@ -162,3 +162,7 @@ python tools/diff_articles.py --inbox inbox/
 python tools/make_delta.py --plan reports/changes-xxx.plan.json --db data/law_data.db --out dist/delta-x.json
 python tools/make_release.py --db data/law_data.db --delta dist/delta-x.json --out-dir dist/
 ```
+
+---
+
+**壹律从简** · [www.yilvai.com](https://www.yilvai.com) · 作者：网络小菜鸟 · 微信：`pmfumin`
