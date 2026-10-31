@@ -1,3 +1,6 @@
+# 壹律从简  www.yilvai.com
+# 作者：网络小菜鸟
+
 """共享 schema 与法条主键规则。
 
 被 ingest/ 与 tools/ 共用：

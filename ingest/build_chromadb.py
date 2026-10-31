@@ -1,3 +1,6 @@
+# 壹律从简  www.yilvai.com
+# 作者：网络小菜鸟
+
 """从 SQLite 数据库构建 ChromaDB 向量库。
 
 直接从 law_articles 表读取法条，用 sentence-transformers 生成 embedding，

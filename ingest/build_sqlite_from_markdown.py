@@ -1,3 +1,6 @@
+# 壹律从简  www.yilvai.com
+# 作者：网络小菜鸟
+
 """从法规 Markdown 直接构建 SQLite 真源库（反转主从：不再依赖 ChromaDB）。
 
 用法：

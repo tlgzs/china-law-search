@@ -1,3 +1,6 @@
+# 壹律从简  www.yilvai.com
+# 作者：网络小菜鸟
+
 """China Law Search API — 中国法律法规检索 API（双库架构）。
 
 ChromaDB 向量语义检索 + SQLite 精确查找，双库互补，向量库不可用自动降级 FTS。

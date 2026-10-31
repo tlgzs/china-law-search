@@ -1,3 +1,6 @@
+# 壹律从简  www.yilvai.com
+# 作者：网络小菜鸟
+
 """法条查询内核 — 纯 sqlite3，不依赖 FastAPI / uvicorn。
 
 被两处共用，是唯一实现：

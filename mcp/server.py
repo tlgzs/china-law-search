@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# 壹律从简  www.yilvai.com
+# 作者：网络小菜鸟
+
 """壹律法条 · MCP 服务器（stdio）。
 
 设计取舍：
