@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 装不上 / 打不开
+    url: https://github.com/tlgzs/china-law-search/blob/main/INSTALL.md
+    about: 先看 INSTALL.md，第一节有「把这段发给 AI」的一键安装说明
+  - name: 接进 agent（MCP）配置不生效
+    url: https://github.com/tlgzs/china-law-search/blob/main/mcp/README.md
+    about: 各家客户端的配置位置，以及「写文件不等于生效」的几个坑

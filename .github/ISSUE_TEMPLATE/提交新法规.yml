@@ -1,0 +1,104 @@
+name: 提交新法规
+description: 库里没有这部法规，或只有旧版本，把官方原件交上来
+title: "[新法规] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个表单用于**库里没有**的法规。条文有错、条号错位请走「法条纠错」。
+
+        **最有用的东西是官方原件**：把 `.docx` / `.md` 直接拖进下面的「原件」框，比写一百字描述管用。
+        维护者会用自己的管线重新解析、比对、出报告，不直接采用外部生成的数据库或补丁包。
+
+  - type: input
+    id: law_name
+    attributes:
+      label: 法规全名
+      description: 写书名号里的全称，不要写简称
+      placeholder: 中华人民共和国劳动合同法
+    validations:
+      required: true
+
+  - type: dropdown
+    id: law_type
+    attributes:
+      label: 分类
+      options:
+        - 法律
+        - 行政法规
+        - 地方性法规
+        - 司法解释
+        - 修改决定
+        - 法律解释
+        - 监察法规
+        - 宪法
+        - 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: publish_date
+    attributes:
+      label: 公布日期
+      placeholder: "2026-08-28"
+
+  - type: input
+    id: effective_date
+    attributes:
+      label: 施行日期
+      placeholder: "2027-01-01"
+
+  - type: input
+    id: authority
+    attributes:
+      label: 制定机关
+      placeholder: 全国人民代表大会常务委员会
+
+  - type: input
+    id: official_url
+    attributes:
+      label: 官方页面链接
+      description: 国家法律法规数据库（flk.npc.gov.cn）上的对应页面
+      placeholder: https://flk.npc.gov.cn/detail2.html?...
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: 原件
+      description: 把官方下载的 .docx / .md 拖进来，多个文件可打包成 zip。暂时没有原件就在备注里说明。
+      placeholder: 拖拽文件到此处
+    validations:
+      required: false
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: 原件来源
+      options:
+        - 国家法律法规数据库下载件
+        - 第三方镜像的原始 docx（上游为官方库）
+        - 中国人大网等官方网站转载稿
+        - 其他（请在备注里说明）
+    validations:
+      required: true
+
+  - type: textarea
+    id: note
+    attributes:
+      label: 备注
+      description: 这部法规为什么重要、你是在哪个案子里用到的、库内现有版本差在哪
+      placeholder: 库内还是 2017 版，2026-08-28 第四次修正后条数从 60 条变为 65 条
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 原件是官方或官方镜像的原始文件，不是法律门户 / 公众号 / 文库站的二次排版稿
+          required: true
+        - label: 我没有改动条文文字、标点或条号
+          required: true
+        - label: 我知道部门规章、地方政府规章、军事法规、党内法规、国际条约不在收录范围
+          required: true

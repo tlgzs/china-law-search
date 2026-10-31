@@ -324,6 +324,24 @@ python3 tools/update.py --apply reports/changes-<时间>.plan.json --approve
 
 流水线的完整设计（比对口径、版本模型、校验项）见 `docs/UPDATE-PIPELINE.md`。
 
+## 提交新法规 / 条文纠错
+
+库里缺法规、条文有错、版本不是最新，都可以提，**不用会写代码**。
+
+- **只报缺**：用 [提交新法规](https://github.com/tlgzs/china-law-search/issues/new?template=%E6%8F%90%E4%BA%A4%E6%96%B0%E6%B3%95%E8%A7%84.yml)
+  表单提 issue，写清法规全名与官方页面链接。
+- **手上有原件**：把官方下载的 `.docx` / `.md` 直接拖进 issue。原件比任何描述都有用——
+  维护者用自己的管线重新解析、比对、出报告，不采用外部生成的数据库或补丁包。
+- **想连比对结论一起交**：本地跑 `python3 tools/update.py --inbox inbox/`，
+  把生成的 `plan.json` 附上。它只作参考，不会被直接写进库。
+
+两条要求：原件来自国家法律法规数据库或其原始镜像，不从门户网站转载稿里取；
+法条文字一律不改写、不补标点。完整流程与会被拒的情形见
+[`CONTRIBUTING.md`](CONTRIBUTING.md#提交新法规数据)。
+
+**不要交整库 `.db`，也不要接受别人私下发的 `delta-*.json` 包。**
+`apply_delta.py` 只校验格式、不认来源，包里的内容没有人替你核过。
+
 ## 发版
 
 ```bash
@@ -402,6 +420,7 @@ tools/
   make_release.py              打包发版资产
 state/change-ledger.json       变更账本：自首个 Release 起改过的法规清单
 docs/UPDATE-PIPELINE.md        更新流水线的设计说明
+.github/ISSUE_TEMPLATE/        issue 表单：提交新法规 / 法条纠错
 ```
 
 **为什么单抽一个 `law_query_core.py`**：条号「之一」与法规名归一这两条规则，
@@ -438,7 +457,9 @@ docs/UPDATE-PIPELINE.md        更新流水线的设计说明
    部门规章和地方政府规章不在其中。
 
 **条文和官网对不上？** 以国家法律法规数据库发布的正式文本为准。
-本项目只是把公开数据落到本地，不做任何改写。发现问题请提 issue 并注明法规名称与条号。
+本项目只是把公开数据落到本地，不做任何改写。发现问题请用
+[法条纠错](https://github.com/tlgzs/china-law-search/issues/new?template=%E6%B3%95%E6%9D%A1%E7%BA%A0%E9%94%99.yml)
+表单提，附上官方原文对照。
 
 **能不能直接对公网开放？** 技术上可以，但请务必开 `LAW_API_ENFORCE=1` 并配置 token，
 同时放在反向代理后面。默认的免认证模式只适合本机使用。
