@@ -178,6 +178,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO corpus_meta(key, value) VALUES ('corpus_version', '0')"
     )
+    # 条文数据的截止日期（库内法规公布日期的最大值）。与 corpus_version 不同：
+    # 版本号说明「这份库是哪天打的包」，data_cutoff 说明「条文收录到哪一天」。
+    # 两者混用会让人误以为数据是新的，所以单独记一条。
+    conn.execute(
+        "INSERT OR IGNORE INTO corpus_meta(key, value) VALUES ('data_cutoff', '')"
+    )
     conn.commit()
 
 

@@ -111,9 +111,10 @@
       <select id="type">
         <option value="">全部类型</option>
         <option value="law">法律</option>
-        <option value="administrative_regulation">行政法规</option>
+        <option value="regulation">行政法规</option>
         <option value="local_regulation">地方性法规</option>
         <option value="judicial_interpretation">司法解释</option>
+        <option value="amendment">修改决定</option>
       </select>
       <button id="btnSearch">检索</button>
     </div>
@@ -231,7 +232,9 @@ async function loadStatus() {
     const eff = h.sqlite && (h.sqlite.effective || h.sqlite.count);
     const n = eff ? eff.toLocaleString() : "—";
     $("#statusText").textContent = "服务正常 · 现行有效法条 " + n + " 条";
-    $("#foot").textContent = "本地法规库 · 现行有效法条 " + n + " 条 ｜ 数据版本：" +
+    $("#foot").textContent = "本地法规库 · 现行有效法条 " + n + " 条 ｜ 条文截至 " +
+      ((h.sqlite && h.sqlite.data_cutoff) || "见数据版本") +
+      " ｜ 数据版本：" +
       ((h.sqlite && h.sqlite.corpus_version) || "未知") +
       " ｜ 检索方式：" +
       (h.chromadb && h.chromadb.status === "ok" ? "向量 + 全文" : "全文检索") +

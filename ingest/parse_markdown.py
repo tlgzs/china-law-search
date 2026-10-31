@@ -112,6 +112,9 @@ _LAW_TYPE_MAP = {
     "司法解释": ("judicial_interpretation", "司法解释"),
     "监察法规": ("supervision_regulation", "监察法规"),
     "宪法": ("constitution", "宪法"),
+    # 「关于修改《X》的决定」这类文件不是法典，是修改决定。混进「法律」会让
+    # 检索《律师法》时同时命中决定正文，且决定正文没有「第X条」结构。
+    "修改决定": ("amendment", "修改决定"),
 }
 
 
@@ -208,6 +211,29 @@ _SECTION_PATTERN = re.compile(r"^#{0,4}\s*(第[零〇一二三四五六七八九
 # 解析器会误判 metadata 区结束，把其后的 "- 法律法规分类：地方性法规" 一并丢掉。
 _META_PATTERN = re.compile(r"^[-*]\s*(.+?)[:：]\s*(.*)$")
 
+# 引用块里的中文日期，如「（2026年8月28日第十四届全国人大常委会第二十四次会议通过）」
+_CN_DATE_PATTERN = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+
+
+def _publish_date_from_quotes(lines: list[str], limit: int = 40) -> str:
+    """从文件头部引用块提取公布日期，取最晚的一个（沿革按时间递增）。
+
+    pandoc 转出的法规文件把颁布信息放在「>」引用块里。解析主循环整行跳过引用块，
+    文件名又没带日期时，公布日期就会整年为空的——这会让「按公布日期判断新旧版本」
+    直接失效。
+    """
+    dates: list[str] = []
+    for raw in lines[:limit]:
+        s = raw.strip()
+        if re.fullmatch(r"目\s*录", s.replace("\u3000", "")):
+            break
+        if not s.startswith(">"):
+            continue
+        for m in _CN_DATE_PATTERN.finditer(s):
+            y, mo, d = m.groups()
+            dates.append(f"{int(y):04d}-{int(mo):02d}-{int(d):02d}")
+    return max(dates) if dates else ""
+
 
 @dataclass
 class Article:
@@ -287,6 +313,10 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
     current_section = ""
     in_metadata_block = True
     found_first_content = False  # 是否已找到第一条法条或章节标题
+
+    # 文件名没带公布日期时，从头部引用块兜底（引用块在主循环里会被整行跳过）
+    if not result.publish_date:
+        result.publish_date = _publish_date_from_quotes(lines)
 
     for line in lines:
         line = line.rstrip("\n\r")

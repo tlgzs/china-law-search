@@ -159,7 +159,8 @@ def apply_plan(db_path: str, plan_path: str, approve: bool, vectors: bool, force
 
     with conn:  # 单事务：任何一步失败全部回滚
         for law in plan["laws"]:
-            if law["action"] == "skip":
+            # stale = 镜像里的文本比库里还旧，跳过，绝不回退版本
+            if law["action"] in ("skip", "stale"):
                 continue
             version_id = insert_new_version(conn, law, batch_id)
             if law["action"] == "new":

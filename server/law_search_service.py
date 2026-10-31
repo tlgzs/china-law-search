@@ -438,10 +438,14 @@ async def health():
             }
             result["sqlite"]["corpus_version"] = meta.get("corpus_version")
             result["sqlite"]["snapshot_date"] = meta.get("snapshot_date")
+            # 条文收录截止日（库内法规公布日期的最大值）。和 corpus_version 是两件事：
+            # 版本号说「哪天打的包」，cutoff 说「条文收到哪一天」。律师看的是后者。
+            result["sqlite"]["data_cutoff"] = meta.get("data_cutoff") or None
         except sqlite3.Error:
             # 老库没有 corpus_meta 表，不影响健康检查
             result["sqlite"]["corpus_version"] = None
             result["sqlite"]["snapshot_date"] = None
+            result["sqlite"]["data_cutoff"] = None
     except Exception as e:
         result["sqlite"] = {"status": "error", "message": str(e)}
         result["status"] = "degraded"

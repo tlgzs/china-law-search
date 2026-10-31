@@ -70,6 +70,15 @@ def load_inbox(inbox: str) -> dict[str, dict]:
                         "source_file": result.source_file,
                     }
                 )
+            # 同一条号切出两份时保留正文更长的那份：正文里以「第X条」开头的行
+            # （引用别的法条、决定里的修改项）会被误切成新条，造成重号。
+            # 入库时 ux_articles_key 会让后写入的覆盖前一条，条数就和版本记录对不上。
+            dedup: dict[str, dict] = {}
+            for a in articles:
+                prev = dedup.get(a["key"])
+                if prev is None or len(a["content"]) > len(prev["content"]):
+                    dedup[a["key"]] = a
+            articles = list(dedup.values())
             records[norm_law_name(result.law_name)] = {
                 "law_name": result.law_name,
                 "norm_name": norm_law_name(result.law_name),
@@ -131,13 +140,34 @@ def diff_law(version, old_map: dict, record: dict) -> dict:
         version is not None
         and (record.get("publish_date") or "") <= (version["publish_date"] or "")
     )
-    action = "new" if is_new_law else ("skip" if same_or_older and not changed else "update")
+    # 新文件比库里还旧 → 单独标 stale，绝不覆盖。
+    # 镜像里存在同一部法的历史文本（例如北京市大气污染防治条例，镜像给的是 2014 版，
+    # 库里已经是 2018 版）。原逻辑是「只要条文有变化就算 update」，会拿旧文本顶掉新版本，
+    # 检索结果会整体倒退。
+    strictly_older = (
+        version is not None
+        and (record.get("publish_date") or "") < (version["publish_date"] or "")
+    )
+    if is_new_law:
+        action = "new"
+    elif strictly_older:
+        action = "stale"
+    elif same_or_older and not changed:
+        action = "skip"
+    else:
+        action = "update"
     return {
         "action": action,
         "law_name": record["law_name"],
         "norm_name": record["norm_name"],
         "publish_date": record["publish_date"],
         "effective_date": record["effective_date"],
+        # 以下三个字段原先没往计划里带，写库时 insert_new_version 取 law.get("law_type")
+        # 一律取到 None，于是版本表的法规类型全空（条文明细里却是有值的）。
+        # 前端按类型筛选、/health 的类型统计都会因此漏掉这次新入库的法规。
+        "law_type": record.get("law_type"),
+        "law_type_label": record.get("law_type_label"),
+        "issuing_authority": record.get("issuing_authority"),
         "source_file": record["source_file"],
         "sha256": record["sha256"],
         "old_version_id": version["id"] if version else None,
@@ -179,6 +209,7 @@ def build_plan(db_path: str, inbox: str) -> dict:
             "new_laws": sum(1 for x in laws if x["action"] == "new"),
             "updated_laws": sum(1 for x in laws if x["action"] == "update"),
             "skipped_laws": sum(1 for x in laws if x["action"] == "skip"),
+            "stale_laws": sum(1 for x in laws if x["action"] == "stale"),
             "added_articles": sum(x["stats"]["added"] for x in laws),
             "changed_articles": sum(x["stats"]["changed"] for x in laws),
             "removed_articles": sum(x["stats"]["removed"] for x in laws),
@@ -219,6 +250,10 @@ h1{font-size:22px;margin:0 0 6px;font-weight:600}
 .law header{padding:12px 18px;border-bottom:1px solid #E2E8F0;display:flex;justify-content:space-between;align-items:baseline;gap:12px}
 .law h2{font-size:15px;margin:0;font-weight:600}
 .tag{font-size:12px;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.tag.new{background:#E1F5EE;color:#0F6E56}
+.tag.update{background:#FAEEDA;color:#854F0B}
+.tag.skip{background:#F1F3F5;color:#5D6B7A}
+.tag.stale{background:#FCEBEB;color:#A32D2D}
 .new{background:#E1F5EE;color:#0F6E56}.update{background:#FAEEDA;color:#854F0B}.skip{background:#F1EFE8;color:#5F5E5A}
 .row{padding:12px 18px;border-top:1px solid #F0F2F5;font-size:13px}
 .row:first-of-type{border-top:none}
@@ -238,9 +273,11 @@ footer{color:#5D6B7A;font-size:12px;margin-top:26px}
         f"<div class='card'><b>{s['added_articles']}</b><span>新增条文</span></div>",
         f"<div class='card'><b>{s['changed_articles']}</b><span>修改条文</span></div>",
         f"<div class='card'><b>{s['removed_articles']}</b><span>删除条文</span></div>",
+        f"<div class='card'><b>{s.get('stale_laws', 0)}</b><span>镜像版本更旧·不采用</span></div>",
         "</div>",
     ]
-    label = {"new": "新法规", "update": "有修订", "skip": "无变化/旧文件"}
+    label = {"new": "新法规", "update": "有修订", "skip": "无变化/旧文件",
+             "stale": "镜像版本更旧·不采用"}
     for law in plan["laws"]:
         st = law["stats"]
         parts.append("<section class='law'><header>")

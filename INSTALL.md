@@ -31,7 +31,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 > 5. **接入 AI 客户端**：`python3 mcp/install.py --all --yes`
 >    它会把配置写进本机 AI 客户端的 MCP 配置，写入前会自动备份原文件。
 > 6. **自检**：`python3 mcp/server.py --selftest`，把输出**原样**贴给我。
->    正常应该看到 5 行 `OK` 加最后一行「全部通过」，并且条文总数是 1,027,471。
+>    正常应该看到 5 行 `OK` 加最后一行「全部通过」，并且条文总数是 1,034,724。
 > 7. **验收**：用 MCP 的 `get_article` 工具查「劳动合同法 第八十二条」，
 >    把条文原文和返回值里的 `data_snapshot` 一起给我。查得到、条号对得上，才算装好。
 > 8. **最后启动本地查询界面**：运行 `./start.sh`（Windows 用 `启动.bat`），
@@ -136,7 +136,7 @@ python3 mcp/server.py --selftest
 库路径：/Users/你的用户名/china-law-search/data/law_data.db
 OK   initialize → protocol=2024-11-05
 OK   tools/list → ['get_article', 'get_law', 'search_articles', 'verify_citation']
-OK   stats → 条文 1027471 / 现行 698067 / 法规 16587
+OK   stats → 条文 1034724 / 现行 700471 / 法规 16808
      快照 → corpus_version='2026.10.30.1'
 OK   get_article → ... 第一条 (1018 字节)
 OK   verify_citation → 1/2 命中（预期 1/2）
@@ -144,7 +144,7 @@ OK   verify_citation → 1/2 命中（预期 1/2）
 全部通过
 ```
 
-第 3 行的三个数字对得上（条文 1,027,471 / 现行 698,067 / 法规 16,587），
+第 3 行的三个数字对得上（条文 1,034,724 / 现行 700,471 / 法规 16,808），
 说明库是完整的。数字差很多，就是库没下好，重跑 3.2。
 
 ---
@@ -215,7 +215,7 @@ Windows 上是把 `启动.bat` 的快捷方式放进「启动」文件夹（`Win
 | 下载到一半断了 | 网络 | 直接重跑同一条命令，会重新下；旧库不会被破坏 |
 | `sha256 不匹配` | 下载损坏或代理改写了内容 | 重跑；仍失败就手动下 `.gz` 包再 `--from-file` |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | 公司代理 / 内网拦截 | 用浏览器下包，再 `--from-file` |
-| 自检条文数远小于 1,027,471 | 库没下好，或下的是旧版本 | 看 `--check` 输出，跑 `--full` 重下全量 |
+| 自检条文数远小于 1,034,724 | 库没下好，或下的是旧版本 | 看 `--check` 输出，跑 `--full` 重下全量 |
 | WorkBuddy 里看不到工具 | 没点「信任」，或没重开会话 | 见第四节 |
 | agent 说「查不到这条法条」 | 可能真不在库里（部门规章不在） | 先用 `get_law` 查法规名是否存在，再判断 |
 | `database is locked` | 有另一个进程正在写库 | 关掉正在跑的更新脚本再试 |
