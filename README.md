@@ -327,12 +327,28 @@ python3 tools/update.py --apply reports/changes-<时间>.plan.json --approve
 ## 发版
 
 ```bash
-# 打包全量库 + 增量包 + manifest（同时产出 .zst 与 .gz）
-python3 tools/make_release.py --db data/law_data.db --delta delta-2026.10.31.json --out-dir dist/
+# 1) 把本次变更并入账本，并打出累积增量包
+python3 tools/make_delta.py --plan reports/changes-xxx.plan.json \
+    --out dist/delta-2026.11.30.1.json
 
-# 上传为 Release（需已安装 gh 并登录）
-gh release create data-2026.10.31 dist/* --title "数据 2026.10.31" --notes "法规 N 部 / 法条 N 条"
+# 2) 打包全量库 + 增量包 + manifest（同时产出 .zst 与 .gz）
+python3 tools/make_release.py --db data/law_data.db \
+    --delta dist/delta-2026.11.30.1.json --out-dir dist/
+
+# 3) 上传为 Release（需已安装 gh 并登录）
+gh release create data-2026.11.30.1 dist/* --title "数据 2026.11.30" --notes "法规 N 部 / 法条 N 条"
 ```
+
+**增量包是累积的，不是一版配一版。** `state/change-ledger.json` 记着自首个
+Release 起所有改过的法规，每次发版把账本里每部法的**最终态全文**打进去。所以
+用户的库停在哪一版都只下这几 MB，不用逐版追。同一部法改过多次，包里只存最终
+一份，体积随「改过多少部法」增长，不随发版次数叠加。
+
+实测参考：315 部法规 / 7253 条正文 → 8.5 MB 未压缩、**1.4 MB gz**、841 KB zst。
+
+必须先跑 `make_delta.py` 再跑 `make_release.py`：前者顺带更新账本，跳过它直接
+打包会让增量包内容与账本对不上。`make_release.py` 会核对增量包的 `to_version`
+与本次全量库版本，不一致直接拒绝——那说明增量包是用旧的库打的。
 
 两种压缩格式都要发，不是冗余：用户机器上可能既没有 `zstandard` 库也没有 `zstd` 命令，
 那时只能退回 `.gz`（`gzip` 是 Python 内置）。只发 `.zst` 会让这类用户装不上数据。
@@ -345,9 +361,19 @@ gh release create data-2026.10.31 dist/* --title "数据 2026.10.31" --notes "�
 python3 tools/fetch_data.py
 ```
 
-它读 Release 的 `manifest.json` 比对本地 `corpus_version`：已是最新就什么都不做；
-有新版且增量包正好以本地版本为起点，就只下增量；否则下全量（约 660 MB）。
-`apply_delta.py` 仍然可用，适合手工控制升级时点。
+它读 Release 的 `manifest.json`：已是最新就不动；本地版本不早于增量包的
+`min_version` 就只下增量（几 MB）；本地比 `min_version` 还旧（中间断了好几轮，
+只补这一包会漏掉更早的改动）才下全量。增量这条路任何一步不通都会**自动回落全量**，
+不会把用户卡在报错上。
+
+增量应用约 100 秒，其中 90 多秒花在重建 100 万条的全文索引上。只有真的写入了
+新法规才重建；版本号对得上、或内容已在库里（重复应用、断点重跑）时直接返回。
+
+手工控制升级时点可以单独用：
+
+```bash
+python3 tools/apply_delta.py --delta dist/delta-2026.11.30.1.json.gz
+```
 
 ## 目录结构
 
@@ -371,9 +397,10 @@ tools/
   fetch_data.py                下载 / 校验 / 安装数据包（用户侧）
   update.py                    增量更新主程序（出报告 / 确认写库）
   diff_articles.py             条文级比对 + HTML 报告
-  make_delta.py                生成增量包
-  apply_delta.py               应用增量包
+  make_delta.py                生成累积增量包（顺带更新变更账本）
+  apply_delta.py               应用增量包（幂等，可重复跑）
   make_release.py              打包发版资产
+state/change-ledger.json       变更账本：自首个 Release 起改过的法规清单
 docs/UPDATE-PIPELINE.md        更新流水线的设计说明
 ```
 

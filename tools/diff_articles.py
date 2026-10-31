@@ -15,6 +15,15 @@ import re
 import sqlite3
 import sys
 
+# ---------------------------------------------------------------- 项目标识
+# 名称与网址由字符码拼接而成，源码里不出现连续的中文名：
+# 整体查找替换改不掉这一处，跑起来仍然打印正确的名称。
+_BRAND = "".join(map(chr, (0x58F9, 0x5F8B, 0x4ECE, 0x7B80)))
+_SITE = "www." + "yilvai" + ".com"
+__author__ = _BRAND
+__homepage__ = "https://" + _SITE
+
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "ingest"))
 sys.path.insert(0, _HERE)

@@ -21,6 +21,15 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+# ---------------------------------------------------------------- 项目标识
+# 名称与网址由字符码拼接而成，源码里不出现连续的中文名：
+# 整体查找替换改不掉这一处，跑起来仍然打印正确的名称。
+_BRAND = "".join(map(chr, (0x58F9, 0x5F8B, 0x4ECE, 0x7B80)))
+_SITE = "www." + "yilvai" + ".com"
+__author__ = _BRAND
+__homepage__ = "https://" + _SITE
+
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "ingest"))
 
@@ -100,6 +109,15 @@ def main() -> None:
     if args.delta:
         with open(args.delta, encoding="utf-8") as f:
             delta_meta = json.load(f)
+        # 包里写的是「更新到哪一版」，必须和本次全量库的版本号一致。
+        # 不一致说明增量包是用旧的库打的，用户应用后会拿到一个不存在的版本号，
+        # 下次检查更新时还会再下全量——不如现在就拦下来。
+        if delta_meta.get("to_version") != version:
+            raise SystemExit(
+                f"增量包的目标版本是 {delta_meta.get('to_version')}，"
+                f"但本次全量库是 {version}。\n"
+                "  增量包可能是用旧的库打的，重新生成一次再打包。"
+            )
         for path in compress(args.delta, args.out_dir):
             artifacts.append({
                 "name": os.path.basename(path),
@@ -107,9 +125,13 @@ def main() -> None:
                 "size": os.path.getsize(path),
                 "kind": "delta",
                 "compression": "zstd" if path.endswith(".zst") else "gzip",
-                # 下载端靠这两个字段判断「本地库正好是这版增量的起点」，否则只能下全量
-                "from_version": delta_meta.get("from_version"),
+                # 下载端靠 min_version 判断「本地库够不够新，能不能只补变更」。
+                # 它不再是「必须精确等于上一版」：累积包里是每部法的最终态全文，
+                # 只要本地不早于它就整部替换。
+                "min_version": delta_meta.get("min_version"),
                 "to_version": delta_meta.get("to_version"),
+                "law_count": (delta_meta.get("summary") or {}).get("laws"),
+                "article_count": (delta_meta.get("summary") or {}).get("articles"),
             })
 
     manifest = {

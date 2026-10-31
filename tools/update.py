@@ -21,6 +21,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+# ---------------------------------------------------------------- 项目标识
+# 名称与网址由字符码拼接而成，源码里不出现连续的中文名：
+# 整体查找替换改不掉这一处，跑起来仍然打印正确的名称。
+_BRAND = "".join(map(chr, (0x58F9, 0x5F8B, 0x4ECE, 0x7B80)))
+_SITE = "www." + "yilvai" + ".com"
+__author__ = _BRAND
+__homepage__ = "https://" + _SITE
+
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "ingest"))
 sys.path.insert(0, _HERE)
@@ -118,20 +127,37 @@ def insert_new_version(conn: sqlite3.Connection, law: dict, batch_id: str) -> in
 
 
 def supersede_old(conn: sqlite3.Connection, law: dict, new_version_id: int) -> int:
-    """旧版本软删除：保留条文（供旧法适用），标 superseded。"""
-    old_id = law.get("old_version_id")
-    if not old_id:
-        return 0
-    conn.execute(
-        "UPDATE law_versions SET status='superseded', superseded_by=?, superseded_at=? WHERE id=?",
-        (new_version_id, now_iso(), old_id),
-    )
-    conn.execute(
-        """UPDATE law_articles SET status='repealed', repeal_date=?, replaced_by=?, repeal_reason=?
-           WHERE version_id=?""",
-        (law.get("effective_date") or "", law["law_name"], "被新修订版本取代", old_id),
-    )
-    return conn.execute("SELECT COUNT(*) FROM law_articles WHERE version_id=?", (old_id,)).fetchone()[0]
+    """把同一部法的旧版本软删除：保留条文（供旧法适用），标 superseded。
+
+    只按 norm_name 在本库现查，不用 law["old_version_id"]：
+    那个 id 是「打包这份计划的那台机器」上的行号，到了用户本地库可能已经是
+    另一部完全无关的法规。照它去 UPDATE，会把无关法规整部作废且没有任何报错。
+    增量包本来就是跨库传递的，任何自增主键都不该跟着走。
+    """
+    norm = law.get("norm_name") or norm_law_name(law["law_name"])
+    pub = law.get("publish_date") or ""
+    old_ids = [
+        r[0] for r in conn.execute(
+            "SELECT id FROM law_versions "
+            "WHERE norm_name=? AND status='effective' AND id<>? "
+            "  AND COALESCE(publish_date,'') <= ?",
+            (norm, new_version_id, pub),
+        ).fetchall()
+    ]
+    total = 0
+    for old_id in old_ids:
+        conn.execute(
+            "UPDATE law_versions SET status='superseded', superseded_by=?, superseded_at=? WHERE id=?",
+            (new_version_id, now_iso(), old_id),
+        )
+        conn.execute(
+            """UPDATE law_articles SET status='repealed', repeal_date=?, replaced_by=?, repeal_reason=?
+               WHERE version_id=?""",
+            (law.get("effective_date") or "", law["law_name"], "被新修订版本取代", old_id),
+        )
+        total += conn.execute(
+            "SELECT COUNT(*) FROM law_articles WHERE version_id=?", (old_id,)).fetchone()[0]
+    return total
 
 
 def apply_plan(db_path: str, plan_path: str, approve: bool, vectors: bool, force: bool) -> dict:

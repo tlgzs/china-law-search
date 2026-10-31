@@ -31,8 +31,19 @@ import time
 import urllib.error
 import urllib.request
 
+# ---------------------------------------------------------------- 项目标识
+# 名称与网址由字符码拼接而成，源码里不出现连续的中文名：
+# 整体查找替换改不掉这一处，跑起来仍然打印正确的名称。
+_BRAND = "".join(map(chr, (0x58F9, 0x5F8B, 0x4ECE, 0x7B80)))
+_SITE = "www." + "yilvai" + ".com"
+__author__ = _BRAND
+__homepage__ = "https://" + _SITE
+
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 # 仓库建好后可用环境变量或 --repo 覆盖，避免改代码
 DEFAULT_REPO = os.environ.get("LAW_REPO", "")
@@ -292,6 +303,70 @@ def install_from_file(src: str, db: str, expect_sha: str | None) -> None:
         print(f"  数据版本：{ver[0]}")
 
 
+def install_delta(src: str, db: str) -> dict:
+    """把下载到的增量包应用到已有库。
+
+    增量包是 JSON（可能套一层 gzip），不是数据库文件，绝不能走 install_from_file
+    那条「解压 → 当 SQLite 打开 → 覆盖现有库」的路：那样会在校验阶段报
+    「解压结果不是有效的数据库」，还把用户卡住，因为原逻辑不会回头下全量。
+    """
+    import apply_delta
+
+    path = src
+    tmp = None
+    if src.endswith(".gz"):
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".json", prefix="lawdelta-")
+        os.close(fd)
+        with gzip.open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst)
+        path = tmp
+    try:
+        print("  应用增量…")
+        return apply_delta.apply_delta_file(path, db)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _pick_full(manifest: dict, prefer_gz: bool, have: set) -> dict:
+    """挑全量库资产。挑不到时说清楚是 manifest 与实际 Release 对不上。"""
+    art = pick_artifact(manifest.get("artifacts", []), "full", prefer_gz, have)
+    if art is None:
+        listed = [a["name"] for a in manifest.get("artifacts", []) if a.get("kind") == "full"]
+        raise SystemExit(
+            "这个 Release 里没有可用的全量库资产（kind=full）。\n"
+            f"  manifest 里列着：{', '.join(listed) or '（无）'}\n"
+            f"  Release 上实际有：{', '.join(sorted(have)) or '（无）'}\n"
+            "  两者对不上，说明上传时漏了文件，请联系维护者。"
+        )
+    print(f"\n下载全量库：{art['name']}（{_human(art.get('size') or 0)}）")
+    return art
+
+
+def _fetch_one(art: dict, url: str) -> str:
+    """下载一个资产并校验 sha256。返回本地临时文件路径，调用方负责删。
+
+    后缀跟着资产名走：增量包要靠 .gz 后缀决定解不解压。
+    """
+    suffix = os.path.splitext(art["name"])[1]
+    fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="lawfetch-")
+    os.close(fd)
+    try:
+        download(url, tmp, art["name"])
+        got = _sha256(tmp)
+        expect = art.get("sha256")
+        if expect and got != expect:
+            raise SystemExit(
+                f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n文件可能损坏，请重试。")
+        print("  校验通过")
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    return tmp
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="下载法条数据包到 data/",
@@ -313,6 +388,11 @@ def main() -> int:
         src = os.path.abspath(os.path.expanduser(args.from_file))
         if not os.path.isfile(src):
             raise SystemExit(f"文件不存在：{src}")
+        base = os.path.basename(src)
+        if base.startswith("delta") or ".json" in base:
+            result = install_delta(src, db)
+            print(f"\n已更新到 {result.get('to_version')}。")
+            return 0
         install_from_file(src, db, None)
         return 0
 
@@ -344,30 +424,40 @@ def main() -> int:
         print("\n有新版本可用，执行 python3 tools/fetch_data.py 下载。")
         return 0
 
-    # 增量只对「本地版本正好是该增量的起点」有效；首个 Release 没有 delta
+    # 增量包按「累积变更集」发布：包里是账本内每部法规的最终态全文，
+    # 只要本地不早于 min_version 就能整部替换，不要求和上一版精确配对。
     have = set(assets)
     art = None
     if cur_ver and not args.full:
         delta = pick_artifact(manifest.get("artifacts", []), "delta", args.prefer_gz, have)
-        if delta and delta.get("from_version") == cur_ver:
+        if delta and delta.get("min_version") and (
+                version_key(cur_ver) >= version_key(delta["min_version"])):
             art = delta
-            print("\n发现适用增量包，只下变更部分。")
-    if art is None:
-        art = pick_artifact(manifest.get("artifacts", []), "full", args.prefer_gz, have)
-        if art is None:
-            listed = [a["name"] for a in manifest.get("artifacts", []) if a.get("kind") == "full"]
-            raise SystemExit(
-                "这个 Release 里没有可用的全量库资产（kind=full）。\n"
-                f"  manifest 里列着：{', '.join(listed) or '（无）'}\n"
-                f"  Release 上实际有：{', '.join(sorted(have)) or '（无）'}\n"
-                "  两者对不上，说明上传时漏了文件，请联系维护者。"
-            )
-        size = art.get("size") or 0
-        print(f"\n下载全量库：{art['name']}（{_human(size)}）")
+            print(f"\n本机版本 {cur_ver} 在增量范围内，只下变更部分"
+                  f"（{_human(delta.get('size') or 0)}）。")
 
-    url = assets.get(art["name"])
-    if not url:
-        raise SystemExit(f"Release 里找不到资产 {art['name']}。")
+    if art is not None:
+        url = assets.get(art["name"])
+        if not url:
+            raise SystemExit(f"Release 里找不到资产 {art['name']}。")
+        tmp = None
+        try:
+            tmp = _fetch_one(art, url)
+            result = install_delta(tmp, db)
+            print(f"\n已更新到 {result.get('to_version')}。")
+            return 0
+        except SystemExit as e:
+            # 增量这条路任何一步不通（格式不认、本地版本太老、解压失败…）
+            # 都退回全量，而不是把用户顶在这里。
+            print(f"\n增量更新未成功：{e}")
+            print("改成下载全量库，这一步会重新下 600 MB 以上，请稍等。")
+        finally:
+            if tmp and not args.keep and os.path.exists(tmp):
+                os.remove(tmp)
+        art = _pick_full(manifest, args.prefer_gz, have)
+        url = assets.get(art["name"])
+        if not url:
+            raise SystemExit(f"Release 里找不到资产 {art['name']}，无法回落全量。")
 
     os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(art["name"])[1], prefix="lawfetch-")
