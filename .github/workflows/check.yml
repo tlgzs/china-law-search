@@ -1,0 +1,59 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # 3.9 是硬底线：macOS 自带的就是它，用户不该为了查法条先装运行时。
+      # 这里只做语法编译，不导入——核心链路零第三方依赖，导入也不需要装包。
+      - name: 语法编译（Python 3.9）
+        run: python -m py_compile server/*.py mcp/*.py tools/*.py ingest/*.py
+
+      - name: 校验 issue 表单
+        run: |
+          python -m pip install --quiet pyyaml
+          python - <<'PY'
+          import glob
+          import sys
+
+          import yaml
+
+          bad = []
+          for path in sorted(glob.glob(".github/ISSUE_TEMPLATE/*.yml")):
+              try:
+                  doc = yaml.safe_load(open(path, encoding="utf-8"))
+              except Exception as exc:  # noqa: BLE001
+                  bad.append(f"{path}: {exc}")
+                  continue
+              if "body" in doc:
+                  if not doc.get("name") or not doc.get("description"):
+                      bad.append(f"{path}: 缺少 name 或 description")
+                  for item in doc["body"]:
+                      if item.get("type") != "markdown" and not item.get("id"):
+                          bad.append(f"{path}: 有一个字段没有 id")
+
+          print("\n".join(bad) or "issue 表单 OK")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: 检查遗留占位符
+        run: |
+          if grep -rn "<owner>" README.md CONTRIBUTING.md INSTALL.md docs/; then
+            echo "::error::文档里还有 <owner> 占位符，用户复制命令会直接失败"
+            exit 1
+          fi
+          echo "无占位符"

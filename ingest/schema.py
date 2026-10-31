@@ -175,6 +175,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_articles_key "
         "ON law_articles(version_id, article_number_num, COALESCE(article_suffix,''))"
     )
+    # 引文核验走的是 law_name + 条号两条等值条件（server/law_query_core.py 的
+    # get_article），而上面两条索引都以 version_id 打头，用不上 law_name。
+    # 缺这条索引时每核一条要扫 100 万行、约 0.5 秒；补上后是毫秒级。
+    # 老库首次启动会就地建一次（约 10 秒），之后 IF NOT EXISTS 是纯元数据查询。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_articles_law_num "
+        "ON law_articles(law_name, article_number_num)"
+    )
     conn.execute(
         "INSERT OR IGNORE INTO corpus_meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),

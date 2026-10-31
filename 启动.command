@@ -7,7 +7,7 @@ echo "  壹律法条 · 本地法规检索服务启动中"
 echo "======================================"
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "未检测到 python3。请先安装 Python 3.10+（https://www.python.org/downloads/）后重试。"
+  echo "未检测到 python3。请先安装 Python 3.9+（https://www.python.org/downloads/）后重试。"
   read -r -p "按回车键关闭…" _
   exit 1
 fi
@@ -26,7 +26,7 @@ fi
 if [ ! -f data/law_data.db ]; then
   echo ""
   echo "提示：未找到数据文件 data/law_data.db"
-  echo "     运行下面这行自动下载（约 262 MB，含校验）："
+  echo "     运行下面这行自动下载（约 690 MB，装过 zstd 则是 500 MB，含校验）："
   echo "       python3 tools/fetch_data.py"
   echo "     服务仍会启动，但没有数据可查。"
   echo ""

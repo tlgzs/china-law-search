@@ -25,7 +25,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 >    装之前告诉我你打算装到哪个路径。
 > 3. **克隆仓库**：`git clone https://github.com/tlgzs/china-law-search.git`
 > 4. **下载数据**：`cd china-law-search && python3 tools/fetch_data.py`
->    这一步会从 GitHub Release 下载约 660 MB 的数据库，会校验 sha256 后再就位。
+>    这一步会从 GitHub Release 下载约 690 MB 的数据库，会校验 sha256 后再就位。
 >    如果它报「找不到仓库」，改用
 >    `python3 tools/fetch_data.py --repo tlgzs/china-law-search` 重试。
 > 5. **接入 AI 客户端**：`python3 mcp/install.py --all --yes`
@@ -55,8 +55,8 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 | 步 | 它执行什么 | 正常输出 | 耗时 |
 |---|---|---|---|
 | 1 | 检查 `python3` / `git` | 版本号 | 几秒 |
-| 3 | 克隆仓库 | 39 个文件，约 350 KB | 10 秒内 |
-| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 660 MB |
+| 3 | 克隆仓库 | 48 个文件，约 440 KB | 10 秒内 |
+| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 690 MB |
 | 5 | 写 MCP 配置 | 列出探测到的客户端，逐个 `已写入` | 几秒 |
 | 6 | 自检 | 5 行 `OK` + `全部通过` | 约 2 秒 |
 | 7 | 查一个法条 | 条文原文 + 数据版本号 | 1 秒 |
@@ -105,7 +105,7 @@ python3 tools/fetch_data.py --from-file ~/Downloads/law_data-2026.10.30.db.gz   
 **公司网络下不动 GitHub**：用浏览器打开仓库的 Releases 页，手动下载
 `law_data-<版本>.db.gz`，再用 `--from-file` 指过去。`.gz` 不需要装任何解压工具。
 
-**磁盘要留够 4 GB**：库解压后 2.3 GB，下载的压缩包 660 MB，解压时还要一份临时文件。
+**磁盘要留够 4 GB**：库解压后 2.3 GB，下载的压缩包 690 MB，解压时还要一份临时文件。
 **升级已有数据时要留 8 GB**——脚本会把旧库改名成 `law_data.db.bak` 留着，确认新版没问题后可以手动删掉它。
 
 ### 3.3 接入 AI 客户端
@@ -158,7 +158,7 @@ python3 tools/fetch_data.py
 ```
 
 - 已经是最新：什么都不做，直接退出。
-- 有更新：**只下载变更的那几 MB**，不用重下 660 MB 全量。本地停在哪一版都行，
+- 有更新：**只下载变更的那几 MB**，不用重下 690 MB 全量。本地停在哪一版都行，
   不用逐版追。
 - 应用约 100 秒，大部分时间在重建全文索引，这期间别关窗口。
 - 万一增量这条路不通，脚本会自己改下全量，不会把你停在报错上。
@@ -235,7 +235,7 @@ Windows 上是把 `启动.bat` 的快捷方式放进「启动」文件夹（`Win
 | WorkBuddy 里看不到工具 | 没点「信任」，或没重开会话 | 见第四节 |
 | agent 说「查不到这条法条」 | 可能真不在库里（部门规章不在） | 先用 `get_law` 查法规名是否存在，再判断 |
 | `database is locked` | 有另一个进程正在写库 | 关掉正在跑的更新脚本再试 |
-| 磁盘不足 | 库 2.3 GB + 压缩包 660 MB | 新装留 4 GB，升级留 8 GB |
+| 磁盘不足 | 库 2.3 GB + 压缩包 690 MB | 新装留 4 GB，升级留 8 GB |
 
 判断「是装坏了还是本来就没有」的最快办法：
 
@@ -263,4 +263,4 @@ python3 mcp/install.py --remove      # 从各客户端配置里删掉 yilv-law �
 **壹律从简** · [www.yilvai.com](https://www.yilvai.com) · 作者：网络小菜鸟 · 微信：`pmfumin`
 
 按上面排查表还是卡住，把**原样报错**发我（微信或 [Issues](https://github.com/tlgzs/china-law-search/issues)），
-别自己删库重来——数据包 660 MB，重下不值得。
+别自己删库重来——数据包 690 MB，重下不值得。

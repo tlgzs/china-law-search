@@ -38,7 +38,7 @@
 ### 一、接进 agent（不需装任何依赖）
 
 ```bash
-git clone https://github.com/<owner>/china-law-search.git
+git clone https://github.com/tlgzs/china-law-search.git
 cd china-law-search
 python3 tools/fetch_data.py            # 下载数据包并校验
 python3 mcp/install.py --all --yes     # 写入本机 agent 配置
@@ -108,6 +108,15 @@ python3 tools/fetch_data.py --from-file 下载到的 law_data-xxx.db.zst
 
 `--from-file` 也认 `.gz`。两种格式内容一致，`.gz` 略大但解压不需要额外装任何东西。
 
+**直接下 ZIP 包（没用 `git clone`）的人要注意**：解压出来的目录里没有 `.git`，
+`fetch_data.py` 猜不到该从哪个仓库下载，会直接报错退出。显式指定即可：
+
+```bash
+python3 tools/fetch_data.py --repo tlgzs/china-law-search
+```
+
+以后自己 fork 过、想从上游取数据时也用同一个参数。
+
 ## 数据从哪来
 
 法规文本来自**国家法律法规数据库**（`flk.npc.gov.cn`）公开下载的 Markdown 文件，
@@ -155,7 +164,7 @@ python3 tools/fetch_data.py --from-file 下载到的 law_data-xxx.db.zst
 
 ### 版本与校验
 
-数据以 GitHub Release 附件发布，tag 形如 `data-2026.10.31`：
+数据以 GitHub Release 附件发布，tag 与版本号一致，形如 `data-2026.10.31.1`：
 
 - `law_data-<版本>.db.zst` / `.gz`：全量库，两种压缩格式内容一致
 - `delta-<版本>.json.zst` / `.gz`：增量变更集，只含变的法规
@@ -370,6 +379,42 @@ Release 起所有改过的法规，每次发版把账本里每部法的**最终�
 
 两种压缩格式都要发，不是冗余：用户机器上可能既没有 `zstandard` 库也没有 `zstd` 命令，
 那时只能退回 `.gz`（`gzip` 是 Python 内置）。只发 `.zst` 会让这类用户装不上数据。
+
+### 没装 gh 时怎么发
+
+`gh` 不是必装的，网页上操作等价：
+
+1. 仓库右侧 **Releases** → **Create a new release**
+2. **Choose a tag** 填 `data-2026.11.30.1`，Target 选 `main`（点「Create new tag on publish」）
+3. **Release title** 填 `数据 2026.11.30.1`，正文写变更摘要
+4. 把 `dist/` 里三个文件拖进附件框：`manifest.json`、`.gz`、`.zst`。**文件名不能改**，
+   必须与 `manifest.json` 里 `artifacts[].name` 逐字一致，否则用户端挑不到资产
+5. **Release label** 保持 `None`
+6. 点 **Publish release**
+
+两个容易错的点：
+
+- **不要选 `Pre-release`**。`fetch_data.py` 走 `/releases/latest`，GitHub 会跳过预发布，
+  选了之后所有用户下载都报「这个 Release 里没有 manifest.json」。
+- **首个 Release 没有「Set as the latest release」勾选项**，发布后自动成为 latest；
+  从第二个 Release 起才出现，那时必须勾上。
+
+浏览器传大文件失败时，用 token 补传（只需 `repo` 权限的 classic PAT）：
+
+```bash
+RID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  https://api.github.com/repos/tlgzs/china-law-search/releases/tags/data-2026.11.30.1 \
+  | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+
+for f in manifest.json law_data-2026.11.30.1.db.gz law_data-2026.11.30.1.db.zst; do
+  curl -X POST -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary @"dist/$f" \
+    "https://uploads.github.com/repos/tlgzs/china-law-search/releases/$RID/assets?name=$f"
+done
+```
+
+发布后核对 `python3 tools/fetch_data.py --check` 能读到版本，再核对附件大小与 `dist/` 一致。
 
 ### 用户侧升级
 

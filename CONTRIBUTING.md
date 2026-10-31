@@ -91,7 +91,7 @@ python3 tools/update.py --inbox inbox/
 ## 代码贡献
 
 ```bash
-git clone https://github.com/<owner>/china-law-search.git
+git clone https://github.com/tlgzs/china-law-search.git
 cd china-law-search
 python3 tools/fetch_data.py            # 拉数据（不拉也能跑，只是查不到内容）
 python3 mcp/server.py --selftest       # MCP 自检

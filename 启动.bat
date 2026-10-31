@@ -7,7 +7,7 @@ echo ======================================
 
 where python >nul 2>nul
 if errorlevel 1 (
-  echo 未检测到 Python。请先安装 Python 3.10+ 并勾选 Add to PATH。
+  echo 未检测到 Python。请先安装 Python 3.9+ 并勾选 Add to PATH。
   pause
   exit /b 1
 )
@@ -27,7 +27,7 @@ if errorlevel 1 (
 if not exist data\law_data.db (
   echo.
   echo 提示：未找到数据文件 data\law_data.db
-  echo       运行下面这行自动下载（约 262 MB，含校验）：
+  echo       运行下面这行自动下载（约 690 MB，含校验）：
   echo         python tools\fetch_data.py
   echo       服务仍会启动，但没有数据可查。
   echo.

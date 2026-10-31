@@ -17,11 +17,19 @@
   「提交新法规数据」一节：交原件、不交数据库；进阶可以附本地的 `plan.json` 作参考，
   但入库一律由维护者在官方库上重跑。同时写明 `apply_delta.py` 只校验格式、不认来源，
   不接受第三方数据包。
+- **GitHub Actions 检查**。每次 push 用 Python 3.9 编译全部脚本、校验 issue 表单结构、
+  扫文档里的 `<owner>` 占位符。3.9 是硬底线，用别的版本跑等于没测。
 
 ### 变更
 
+- **补 `(law_name, article_number_num)` 复合索引**。引文核验的 SQL 是
+  `WHERE law_name = ? AND article_number_num = ?`，而库里原有两条索引都以
+  `version_id` 打头，用不上 `law_name`，实测每次都是 `SCAN law_articles` 扫 100 万行，
+  耗时 875 ms。补索引后执行计划变成 `SEARCH ... USING INDEX`，0.3 ms。
+  索引在 `ensure_schema` 里以 `IF NOT EXISTS` 建，老库首次启动就地补一次
+  （实测 3.3 秒），库体积增 48 MB。
 - **增量包改成累积变更集**。原来的增量包要求「本地版本正好是本次增量的起点」，
-  用户跳过一版就只能重下 660 MB 全量。现在 `state/change-ledger.json` 记着自首个
+  用户跳过一版就只能重下 690 MB 全量。现在 `state/change-ledger.json` 记着自首个
   Release 起改过的法规，包里放每部法的**最终态全文**，本地只要不早于 `min_version`
   就整部替换。实测 315 部法规的包 1.4 MB gz / 841 KB zst，比全量小三个数量级；
   同一部法改过多次也只存最终一份。
@@ -33,6 +41,12 @@
 
 ### 修复
 
+- **文档里几处会让人直接踩坑的数字与占位符**。`README` / `CONTRIBUTING` 的 clone 命令
+  还写着 `<owner>`，复制粘贴必定失败（改成 `tlgzs`）；tag 示例少了段位号
+  （`data-2026.10.31` → `data-2026.10.31.1`）；包体积按 MiB 写成 660 MB，与 GitHub
+  页面显示的 689 MB 对不上，统一改为 690 MB；`启动.bat` 要求 Python 3.10+ 而实际
+  3.9 就能跑；`启动.command` / `start.sh` 的下载提示分别停在 262 MB 与 490 MB。
+  另外补了「没装 gh 时怎么在网页发版」与「下 ZIP 包的人要加 `--repo`」两段。
 - **增量包会把新版降级成旧版**：`make_delta.py` 筛的是 `action != "skip"`，把
   `stale`（镜像日期比库里旧的）也装了进来，实测混进 97 部。用户应用后，2018 版的
   北京市大气污染防治条例会被换回 2014 版。改成只收 `new` / `update`。
