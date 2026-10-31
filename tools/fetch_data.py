@@ -187,9 +187,17 @@ def version_key(v: str) -> tuple:
     return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (0,)
 
 
-def pick_artifact(artifacts: list, kind: str, prefer_gz: bool) -> dict | None:
-    """在同 kind 的资产里挑一个本机解压得了的。"""
+def pick_artifact(artifacts: list, kind: str, prefer_gz: bool,
+                  available: set | None = None) -> dict | None:
+    """在同 kind 的资产里挑一个本机解压得了、且 Release 里确实存在的。
+
+    available 是 Release 上实际存在的资产文件名集合。维护者可能只上传了
+    .gz 没传 .zst（或反之），manifest 里却两者都列着；不按 available 过滤的话，
+    会挑中只存在于 manifest、实际没上传的那个，然后在下载处硬报错。
+    """
     cands = [a for a in artifacts if a.get("kind") == kind]
+    if available is not None:
+        cands = [a for a in cands if a["name"] in available]
     if not cands:
         return None
     order = (".gz", ".zst") if prefer_gz or not can_zstd() else (".zst", ".gz")
@@ -337,16 +345,23 @@ def main() -> int:
         return 0
 
     # 增量只对「本地版本正好是该增量的起点」有效；首个 Release 没有 delta
+    have = set(assets)
     art = None
     if cur_ver and not args.full:
-        delta = pick_artifact(manifest.get("artifacts", []), "delta", args.prefer_gz)
+        delta = pick_artifact(manifest.get("artifacts", []), "delta", args.prefer_gz, have)
         if delta and delta.get("from_version") == cur_ver:
             art = delta
             print("\n发现适用增量包，只下变更部分。")
     if art is None:
-        art = pick_artifact(manifest.get("artifacts", []), "full", args.prefer_gz)
+        art = pick_artifact(manifest.get("artifacts", []), "full", args.prefer_gz, have)
         if art is None:
-            raise SystemExit("这个 Release 里没有全量库资产（kind=full）。")
+            listed = [a["name"] for a in manifest.get("artifacts", []) if a.get("kind") == "full"]
+            raise SystemExit(
+                "这个 Release 里没有可用的全量库资产（kind=full）。\n"
+                f"  manifest 里列着：{', '.join(listed) or '（无）'}\n"
+                f"  Release 上实际有：{', '.join(sorted(have)) or '（无）'}\n"
+                "  两者对不上，说明上传时漏了文件，请联系维护者。"
+            )
         size = art.get("size") or 0
         print(f"\n下载全量库：{art['name']}（{_human(size)}）")
 
