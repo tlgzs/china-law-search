@@ -346,7 +346,7 @@ python3 tools/fetch_data.py
 ```
 
 它读 Release 的 `manifest.json` 比对本地 `corpus_version`：已是最新就什么都不做；
-有新版且增量包正好以本地版本为起点，就只下增量；否则下全量（约 490 MB）。
+有新版且增量包正好以本地版本为起点，就只下增量；否则下全量（约 660 MB）。
 `apply_delta.py` 仍然可用，适合手工控制升级时点。
 
 ## 目录结构

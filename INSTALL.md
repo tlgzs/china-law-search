@@ -25,7 +25,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 >    装之前告诉我你打算装到哪个路径。
 > 3. **克隆仓库**：`git clone https://github.com/tlgzs/china-law-search.git`
 > 4. **下载数据**：`cd china-law-search && python3 tools/fetch_data.py`
->    这一步会从 GitHub Release 下载约 490 MB 的数据库，会校验 sha256 后再就位。
+>    这一步会从 GitHub Release 下载约 660 MB 的数据库，会校验 sha256 后再就位。
 >    如果它报「找不到仓库」，改用
 >    `python3 tools/fetch_data.py --repo tlgzs/china-law-search` 重试。
 > 5. **接入 AI 客户端**：`python3 mcp/install.py --all --yes`
@@ -56,7 +56,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 |---|---|---|---|
 | 1 | 检查 `python3` / `git` | 版本号 | 几秒 |
 | 3 | 克隆仓库 | 39 个文件，约 350 KB | 10 秒内 |
-| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 490 MB |
+| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 660 MB |
 | 5 | 写 MCP 配置 | 列出探测到的客户端，逐个 `已写入` | 几秒 |
 | 6 | 自检 | 5 行 `OK` + `全部通过` | 约 2 秒 |
 | 7 | 查一个法条 | 条文原文 + 数据版本号 | 1 秒 |
@@ -105,8 +105,8 @@ python3 tools/fetch_data.py --from-file ~/Downloads/law_data-2026.10.30.db.gz   
 **公司网络下不动 GitHub**：用浏览器打开仓库的 Releases 页，手动下载
 `law_data-<版本>.db.gz`，再用 `--from-file` 指过去。`.gz` 不需要装任何解压工具。
 
-**磁盘要留够 4 GB**：库解压后 2.3 GB，下载的压缩包 490 MB，解压时还要一份临时文件。
-**升级已有数据时要留 6 GB**——脚本会把旧库改名成 `law_data.db.bak` 留着，确认新版没问题后可以手动删掉它。
+**磁盘要留够 4 GB**：库解压后 2.3 GB，下载的压缩包 660 MB，解压时还要一份临时文件。
+**升级已有数据时要留 8 GB**——脚本会把旧库改名成 `law_data.db.bak` 留着，确认新版没问题后可以手动删掉它。
 
 ### 3.3 接入 AI 客户端
 
@@ -219,7 +219,7 @@ Windows 上是把 `启动.bat` 的快捷方式放进「启动」文件夹（`Win
 | WorkBuddy 里看不到工具 | 没点「信任」，或没重开会话 | 见第四节 |
 | agent 说「查不到这条法条」 | 可能真不在库里（部门规章不在） | 先用 `get_law` 查法规名是否存在，再判断 |
 | `database is locked` | 有另一个进程正在写库 | 关掉正在跑的更新脚本再试 |
-| 磁盘不足 | 库 2.3 GB + 压缩包 490 MB | 新装留 4 GB，升级留 6 GB |
+| 磁盘不足 | 库 2.3 GB + 压缩包 660 MB | 新装留 4 GB，升级留 8 GB |
 
 判断「是装坏了还是本来就没有」的最快办法：
 
