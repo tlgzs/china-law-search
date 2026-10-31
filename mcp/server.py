@@ -297,11 +297,15 @@ class LawMcpServer:
         """数据快照信息。每条响应都带上，明确「这是某天的库」而非实时同步。"""
         if self._snapshot is not None:
             return self._snapshot
-        info: dict = {"db_path": self.db_path or "", "corpus_version": "", "generated_at": ""}
+        info: dict = {"db_path": self.db_path or "", "corpus_version": "", "generated_at": "",
+                      "data_cutoff": ""}
         try:
             rows = self.store().conn.execute("SELECT key, value FROM corpus_meta").fetchall()
             for r in rows:
-                if r["key"] in ("corpus_version", "generated_at", "built_at", "source"):
+                # data_cutoff 是「条文收录到哪一天」，corpus_version 只是「哪天打的包」。
+                # agent 回答时效性问题时需要前一个。
+                if r["key"] in ("corpus_version", "generated_at", "built_at", "source",
+                                "data_cutoff"):
                     info[r["key"]] = r["value"]
         except Exception:  # noqa: BLE001
             pass
@@ -553,7 +557,8 @@ def selftest(db_path: str | None) -> int:
     stats = srv.store().stats()
     print(f"OK   stats → 条文 {stats['articles_total']} / 现行 {stats['articles_effective']}"
           f" / 法规 {stats['laws']}")
-    print(f"     快照 → corpus_version={srv.snapshot().get('corpus_version')!r}")
+    print(f"     快照 → corpus_version={srv.snapshot().get('corpus_version')!r}"
+          f" 条文截至={srv.snapshot().get('data_cutoff') or '未标注'}")
 
     sample = srv.store().conn.execute(
         "SELECT law_name, article_number, article_number_num FROM law_articles "
