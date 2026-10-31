@@ -9,6 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="author" content="网络小菜鸟">
+<link rel="icon" type="image/png" sizes="64x64" href="brand/seal-64.png">
 <title>壹律法条 · 本地法规检索</title>
 <style>
   :root{
@@ -25,7 +26,9 @@
   footer{flex-shrink:0;margin-top:auto}
   header{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
   .bar{max-width:980px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-  .brand{font-size:16px;font-weight:600;letter-spacing:.02em}
+  .brand{display:flex;align-items:center;gap:11px;font-size:16px;font-weight:600;letter-spacing:.02em}
+  .brand-mark{width:40px;height:40px;flex:none;display:block}
+  .brand-copy{font-size:16px;font-weight:600;letter-spacing:.02em}
   .brand small{display:block;font-size:12px;font-weight:400;color:var(--muted);letter-spacing:0}
   .status{margin-left:auto;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
   .dot{width:7px;height:7px;border-radius:50%;background:#B4B2A9}
@@ -96,8 +99,11 @@
 <body>
 <header>
   <div class="bar">
-    <div class="brand">壹律法条
-      <small>本地法规库 · 条文检索与引文核验</small>
+    <div class="brand">
+      <img class="brand-mark" src="brand/seal-128.png" alt="壹律从简" width="40" height="40">
+      <span class="brand-copy">壹律法条
+        <small>本地法规库 · 条文检索与引文核验</small>
+      </span>
     </div>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">检测服务中…</span></div>
   </div>

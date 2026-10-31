@@ -5,6 +5,8 @@ inbox/*
 !inbox/.gitkeep
 reports/
 dist/
+# 原始截图存档；README 用的是 docs/images/ 下裁切压缩后的版本
+截图/
 
 # 令牌与日志
 api_keys.json
