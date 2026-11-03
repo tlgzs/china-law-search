@@ -196,8 +196,15 @@ def _check_once(repo: str, db: str, prefer_gz: bool) -> dict:
                 data["size_text"] = _human(delta.get("size"))
                 data["artifact"] = delta.get("name")
                 data["min_version"] = min_v
+                data["scope"] = "delta"
+                # 增量包自己也带 law_count，那是「这次变了多少部」，与 manifest
+                # 顶层的全库数不是一回事。混用会让人以为下 1.4 MB 就能拿到全部
+                # 一万六千多部法，实际只有变更过的几百部。
+                data["law_count"] = delta.get("law_count")
+                data["article_count"] = delta.get("article_count")
             else:
                 data["mode"] = "full"
+                data["scope"] = "full"
                 # 直接用 pick_artifact 而不是 fetch_data._pick_full：
                 # 后者会 print「下载全量库…」，检查阶段不该有下载动作的输出。
                 full = fd.pick_artifact(
@@ -251,7 +258,8 @@ def render(status: dict) -> str:
         lines.append(f"  本地 {d['local']}  →  线上 {d['remote']}   "
                      f"可{how}更新，约 {d.get('size_text', '?')}")
         if d.get("law_count"):
-            lines.append(f"       本包含 {d['law_count']} 部法规 / "
+            what = "本次变更" if d.get("scope") == "delta" else "全库"
+            lines.append(f"       {what} {d['law_count']} 部法规 / "
                          f"{d.get('article_count') or '?'} 条正文")
         if d.get("why_full"):
             lines.append(f"       为何不走增量：{d['why_full']}")

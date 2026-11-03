@@ -10,7 +10,23 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [Unreleased]
+## [2.3.1] - 2026-11-03
+
+### 修复
+
+- **增量包是 `.zst` 时，安装直接崩在 `json.load`**。`install_delta()` 只认 `.gz`，
+  而下载端优先挑 `.zst`（体积小一半：1.4 MB 对 2.6 MB）。结果是装了 zstd 的机器
+  ——恰恰是开发机这一类——下完增量包就抛 `UnicodeDecodeError: 'utf-8' codec
+  can't decode byte 0xb5`，而没装 zstd 的机器走 `.gz` 反而没事。改成 `.gz` / `.zst`
+  都走同一个 `decompress()`。这个坑第一次真正发增量包才会暴露，发 10.31 那版时
+  还没有增量资产，所以一直没被发现。
+- **检查更新把全库条数当成包内条数报**。`check_update.py` 从 manifest 顶层取
+  `law_count` / `article_count`，那是整库的 16,874 部 / 702,201 条；增量包里其实只有
+  本次变更的几百部。走增量时会显示「本包含 16874 部法规」，让人以为下 1.4 MB
+  就拿到了全部数据。现在按 mode 取：增量用 delta 资产自带的计数并标「本次变更」，
+  全量用 manifest 顶层并标「全库」。
+
+## [2.3.0] - 2026-11-03
 
 ### 新增
 

@@ -355,20 +355,23 @@ def install_from_file(src: str, db: str, expect_sha: str | None) -> None:
 def install_delta(src: str, db: str) -> dict:
     """把下载到的增量包应用到已有库。
 
-    增量包是 JSON（可能套一层 gzip），不是数据库文件，绝不能走 install_from_file
-    那条「解压 → 当 SQLite 打开 → 覆盖现有库」的路：那样会在校验阶段报
-    「解压结果不是有效的数据库」，还把用户卡住，因为原逻辑不会回头下全量。
+    增量包是 JSON，外面可能套一层 gzip 或 zstd。两种都要解，不能只认 .gz：
+    下载端优先挑 .zst（体积小一半），只处理 .gz 会让所有装了 zstd 的机器在
+    json.load 那一步炸成 UnicodeDecodeError。
+
+    也不能走 install_from_file 那条「解压 → 当 SQLite 打开 → 覆盖现有库」的路：
+    那样会在校验阶段报「解压结果不是有效的数据库」，还把用户卡住，
+    因为原逻辑不会回头下全量。
     """
     import apply_delta
 
     path = src
     tmp = None
-    if src.endswith(".gz"):
+    if src.endswith((".gz", ".zst")):
         import tempfile
         fd, tmp = tempfile.mkstemp(suffix=".json", prefix="lawdelta-")
         os.close(fd)
-        with gzip.open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
-            shutil.copyfileobj(fsrc, fdst)
+        decompress(src, tmp)
         path = tmp
     try:
         print("  应用增量…")
