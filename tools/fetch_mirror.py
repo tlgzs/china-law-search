@@ -54,7 +54,6 @@ AMEND_TYPE = ("amendment", "修改决定")
 
 _DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 _EFFECTIVE_RE = re.compile(r"自(\d{4})年(\d{1,2})月(\d{1,2})日起(?:施行|实施|生效)")
-_CN_ITEM_RE = re.compile(r"^[一二三四五六七八九十百]+[、．.]")
 _UNSAFE = re.compile(r'[:/\\*?"<>|\n\r\t]')
 
 
@@ -163,15 +162,18 @@ def build_markdown(title: str, text: str, amendment: bool) -> str:
     """生成给 parse_markdown 吃的 Markdown。
 
     普通法规：原样保留正文（章条结构由通用解析器切）。
-    修改决定：压成「第1条　（全文）」+ 其余行作续行。
+    修改决定：压成一条带条号的正文，其余行作续行。
+
+    这里只写「第1条」。早先写成「第1条　（修改决定全文，共 N 项修改内容，
+    项号以「一、二、三」排列）」——那是给人看的定位说明，被通用解析器当成条文
+    正文收进 content，检索命中、复制条文都会带上这行，等于凭空给法条加了一句
+    原文没有的话。条号留一个就够解析器切出条目，说明不该进正文。
     """
     lines = body_lines(text)
     if not amendment:
         return "# " + title + "\n\n" + "\n\n".join(lines) + "\n"
 
-    items = [ln for ln in lines if _CN_ITEM_RE.match(ln)]
-    head = f"第1条\u3000（修改决定全文，共 {len(items)} 项修改内容，项号以「一、二、三」排列）"
-    return "# " + title + "\n\n" + head + "\n\n" + "\n\n".join(lines) + "\n"
+    return "# " + title + "\n\n第1条\n\n" + "\n\n".join(lines) + "\n"
 
 
 def law_type_for(path: str, title: str) -> tuple[str, str]:

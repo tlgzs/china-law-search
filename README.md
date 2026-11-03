@@ -556,8 +556,10 @@ tools/
   make_release.py              打包发版资产
   import_flk.py                把 flk 批量下载的 docx 整理成 inbox Markdown
   fix_pending_supersede.py     修复「待生效版本提前作废旧版」的存量数据
+  strip_amendment_note.py      清掉修改决定正文里的解析残留（标注 / 标题残片）
 state/change-ledger.json       变更账本：自首个 Release 起改过的法规清单
 docs/UPDATE-PIPELINE.md        更新流水线的设计说明
+docs/release-notes/            历次发版的 Release 正文存档
 VERSION                        程序版本（唯一来源，server 与发版脚本都读它）
 update.sh                      命令行更新；更新数据.command 双击更新
 .github/ISSUE_TEMPLATE/        issue 表单：提交新法规 / 法条纠错
