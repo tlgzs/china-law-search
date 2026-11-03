@@ -276,6 +276,12 @@ def verify_db(conn: sqlite3.Connection, touched: list[str]) -> dict:
                 "SELECT * FROM law_versions WHERE norm_name=? AND status='pending' "
                 "ORDER BY COALESCE(publish_date,'') DESC, id DESC LIMIT 1", (norm,)).fetchone()
         if version is None:
+            # 整部法被废止时，一条现行版都不剩才是对的：条文已统一标
+            # repealed，不能报成「没入库」。先看有没有废止标记再下结论。
+            if conn.execute(
+                    "SELECT 1 FROM law_versions v JOIN law_articles a ON a.version_id=v.id "
+                    "WHERE v.norm_name=? AND a.status='repealed' LIMIT 1", (norm,)).fetchone():
+                continue
             problems.append(f"{norm}: 无生效版本")
             continue
         rows = conn.execute(

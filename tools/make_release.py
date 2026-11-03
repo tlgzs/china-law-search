@@ -156,6 +156,9 @@ def main() -> None:
                 "to_version": delta_meta.get("to_version"),
                 "law_count": (delta_meta.get("summary") or {}).get("laws"),
                 "article_count": (delta_meta.get("summary") or {}).get("articles"),
+                # 整部废止的部数。归到新增/修改之外单列：用户看到的「本次变更
+                # N 部」若把废止算进去，会以为多了几部新法，实际是少了几部。
+                "repealed_count": (delta_meta.get("summary") or {}).get("repealed") or 0,
             })
 
     manifest = {

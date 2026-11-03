@@ -202,6 +202,7 @@ def _check_once(repo: str, db: str, prefer_gz: bool) -> dict:
                 # 一万六千多部法，实际只有变更过的几百部。
                 data["law_count"] = delta.get("law_count")
                 data["article_count"] = delta.get("article_count")
+                data["repealed_count"] = delta.get("repealed_count") or 0
             else:
                 data["mode"] = "full"
                 data["scope"] = "full"
@@ -261,6 +262,8 @@ def render(status: dict) -> str:
             if d.get("scope") == "delta":
                 lines.append(f"       本次变更 {d['law_count']} 部法规 / "
                              f"{d.get('article_count') or '?'} 条正文")
+                if d.get("repealed_count"):
+                    lines.append(f"       其中 {d['repealed_count']} 部整部废止")
             else:
                 # manifest 顶层的 law_count 只数「有现行版本」的法规（16874），
                 # 另有几十部是已公布、尚未施行的新法：条文已经入库、也算进

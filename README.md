@@ -182,10 +182,10 @@ python3 tools/fetch_data.py --repo tlgzs/china-law-search
 
 ### 版本与校验
 
-数据以 GitHub Release 附件发布，tag 和版本号一致，形如 `data-2026.11.03.2`：
+数据以 GitHub Release 附件发布，tag 和版本号一致，形如 `data-2026.11.03.3`：
 
 - `law_data-<版本>.db.zst` / `.gz`：全量库，两种压缩格式内容一致
-- `delta-<版本>.json.zst` / `.gz`：增量变更集，只装变过的那几部法
+- `delta-<版本>.json.zst` / `.gz`：增量变更集，只装变过的那几部法，外加整部废止的法规清单
 - `manifest.json`：版本号、条数、`db_sha256`，以及各资产的 sha256 与适用版本
 
 每个响应都带 `data_snapshot.corpus_version`，标明这批数据截至哪一版。
@@ -409,15 +409,18 @@ python3 tools/update.py --apply reports/changes-<时间>.plan.json --approve
 ```bash
 # 1) 把本次变更并入账本，并打出累积增量包（一次发版可传多份 --plan，按顺序并账）
 python3 tools/make_delta.py --plan reports/changes-2026xxxxxxxx.plan.json \
-    --out dist/delta-2026.11.03.2.json
+    --out dist/delta-<版本>.json
 
 # 2) 打包全量库 + 增量包 + manifest（同时产出 .zst 与 .gz）
 python3 tools/make_release.py --db data/law_data.db \
-    --delta dist/delta-2026.11.03.2.json --out-dir dist/
+    --delta dist/delta-<版本>.json --out-dir dist/
 
 # 3) 上传为 Release（需已安装 gh 并登录）
-gh release create data-2026.11.03.2 dist/* --title "数据 2026.11.03.2" --notes "法规 N 部 / 法条 N 条"
+gh release create data-<版本> dist/* --title "数据 <版本>" --notes "法规 N 部 / 法条 N 条"
 ```
+
+`make_delta.py` 会顺带扫一遍全库，把「一条现行版都不剩」的法规作为废止清单写进包，
+不用另外跑什么。输出里会单列一行，如「另含 44 部整部废止」。
 
 增量包是累积的，不是每版配一个。`state/change-ledger.json` 记着自首个 Release 起
 所有改过的法规，每次发版把账本里每部法的最终态全文打进去。所以用户的库停在哪一版都只下这几 MB，
@@ -428,9 +431,18 @@ gh release create data-2026.11.03.2 dist/* --title "数据 2026.11.03.2" --notes
 （《医疗保障法》2027-01-01 才施行）；旧版仍生效、新版待施行的（《商标法》），两版都得带，
 否则用户看不到已经公布的修订。到施行日由 `refresh_pending_status` 自动翻成现行，用户不用再下一次。
 
-拿 2026.11.03.2 这版做参考：账本 529 部法，打成 536 条版本、13,503 条正文，
-未压缩 15.5 MB，gz 2.6 MB，zst 1.4 MB。同期的全量库是 gz 676 MB、zst 514 MB。
-也就是说装过十月那版库的用户，这次只需要下 2.6 MB。
+还有第三类，前两类装不下：**整部废止**。一部法被废止决定终止后，一条现行版都不剩，按「取现行版」
+的逻辑它就成了「库里没有这部法」，简单地跳过；结果走增量的用户会一直留着一部已废止的「现行法」，
+比不更新更糟。所以包里有独立的 `repealed` 数组，一部法一条记录，只写名称、废止日期和依据决定，
+**不带正文**——接收端要做的是把本地那部法降级、条文标 `repealed`，一个字的正文都用不上。
+这 44 部合计 2,550 条正文，塞进去会把包撑到 5 MB 以上，而实际只多了几 KB。
+本地根本没装这部法的人，这条记录直接跳过，不会凭空多出一部废法。
+
+拿 2026.11.03.3 这版做参考：账本 529 部法，打成 533 条版本、13,376 条正文，
+再加 44 条废止标记，未压缩 15.4 MB，gz 2.6 MB，zst 1.4 MB。同期的全量库是
+gz 675.7 MB、zst 514.1 MB。装过十月那版库的用户，这次只需要下 2.6 MB。
+
+废止标记几乎不占体积：44 条记录几十 KB，而它们的 2,550 条正文如果要传，得多出 5 MB 以上。
 
 发版机磁盘紧张也不怕。`make_release.py` 用硬链接指向原库再压缩，不会真复制一份 2.4 GB
 出来；跨文件系统时自动退回复制，并提示预留空间。
@@ -532,7 +544,7 @@ export LAW_AUTO_UPDATE=1   # 启动时查到有新版就直接装完，网页只
 想自己控制时点，可以单独用这两个：
 
 ```bash
-python3 tools/apply_delta.py --delta dist/delta-2026.11.03.2.json.gz
+python3 tools/apply_delta.py --delta dist/delta-<版本>.json.gz
 python3 tools/fetch_data.py --from-file 手动下载的包      # 离线安装
 ```
 
@@ -634,9 +646,10 @@ update.sh                      命令行更新；更新数据.command 双击更�
 
 被废止的法规会跟着废止决定一起标失效：当前库里有 44 部是这么处理的 —— 条文标成
 `repealed`，核验时会直接回「该法规已废止」，并写出依据的决定名称和废止日期，不会
-悄悄当现行法返回。这个处理有范围：只认决定名称里能读出一部法规的那类。写成「关于
-废止部分行政法规的决定」这种笼统表述，或者一条决定废止好几部法、名字里又没有书名号
-可拆的，都定位不到具体法规，跳过不动。碰到这类决定，仍以官方公告为准。
+悄悄当现行法返回。这个结果会跟着增量包一起发：包里单列一份废止清单，下增量的用户
+同样能拿到，不必为了这几部法重下全量。这个处理有范围：只认决定名称里能读出一部法规
+的那类。写成「关于废止部分行政法规的决定」这种笼统表述，或者一条决定废止好几部法、
+名字里又没有书名号可拆的，都定位不到具体法规，跳过不动。碰到这类决定，仍以官方公告为准。
 
 ## 作者与联系
 

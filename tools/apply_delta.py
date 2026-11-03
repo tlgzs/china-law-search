@@ -42,6 +42,41 @@ def version_key(v: str) -> tuple:
     return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (0,)
 
 
+def mark_law_repealed(conn: sqlite3.Connection, item: dict) -> tuple[int, int]:
+    """按包里的废止标记，把本地这部法的现行版本降级、条文标废止。
+
+    返回（降级的版本数，标废止的条文数）。本地没有这部法时返回 (0, 0)——
+    用户不需要在自己库里新增一部已废止的法，跳过即可。
+
+    降级时不写 superseded_by：它是「被某个新版顶掉」才有的指向，整部废止
+    没有接班版本，硬塞一个 id 会让核验逻辑指错。判定整部废止靠的是
+    「该法名下一条 effective/pending 都不剩」，不是这个字段。
+    """
+    norm = item.get("norm_name") or norm_law_name(item["law_name"])
+    rep_date = item.get("repeal_date") or ""
+    rep_reason = item.get("repeal_reason") or ""
+
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM law_versions WHERE norm_name=? AND status IN ('effective', 'pending')",
+        (norm,)).fetchall()]
+    if not ids:
+        return 0, 0
+
+    n_art = 0
+    for vid in ids:
+        conn.execute(
+            "UPDATE law_versions SET status='superseded', superseded_by=NULL, superseded_at=? "
+            "WHERE id=?",
+            (now_iso(), vid),
+        )
+        n_art += conn.execute(
+            "UPDATE law_articles SET status='repealed', repeal_date=?, repeal_reason=? "
+            "WHERE version_id=? AND (status IS NULL OR status != 'repealed')",
+            (rep_date, rep_reason, vid),
+        ).rowcount
+    return len(ids), n_art
+
+
 def apply_delta_file(delta_path: str, db: str, force: bool = False,
                      verbose: bool = True) -> dict:
     """应用一个增量包。成功返回统计，失败抛 SystemExit（消息可直接给用户看）。"""
@@ -55,9 +90,9 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
     with open(delta_path, encoding="utf-8") as f:
         delta = json.load(f)
 
-    if delta.get("schema") != 2:
+    if delta.get("schema") not in (2, 3):
         raise SystemExit(
-            f"增量包格式 {delta.get('schema')!r} 不受支持（本版只认 schema=2）。\n"
+            f"增量包格式 {delta.get('schema')!r} 不受支持（本版认 schema=2/3）。\n"
             "  请改用全量库：python3 tools/fetch_data.py --full"
         )
 
@@ -66,7 +101,8 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
     if not min_v or not to_v:
         raise SystemExit("增量包缺少 min_version / to_version，无法判断能否应用。")
     laws = delta.get("laws") or []
-    if not laws:
+    repealed = delta.get("repealed") or []
+    if not laws and not repealed:
         raise SystemExit("增量包里没有法规，拒绝应用。")
 
     conn = sqlite3.connect(db)
@@ -78,7 +114,8 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
         conn.close()
         say(f"已是最新（{current}），无需更新。")
         return {"ok": True, "already_latest": True, "to_version": to_v,
-                "applied": 0, "unchanged": 0, "articles": 0}
+                "applied": 0, "unchanged": 0, "articles": 0,
+                "repealed": 0, "repealed_articles": 0, "repealed_absent": 0}
 
     if version_key(current) < version_key(min_v) and not force:
         conn.close()
@@ -120,6 +157,21 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
             articles += len(law["articles"])
             touched.append(norm)
 
+        # 整部废止放在新增/更新之后：同一部法既不可能又出新版又整部废止，
+        # 分开跑只是让「降级」这件事在日志里有个独立计数，别混进 unchanged。
+        # 本地没有这部法的跳过数单独记：它既不是「已是最新」，也不是「处理了」，
+        # 混进 unchanged 会让人以为本地已有 42 部法的最新版。
+        repealed_laws = repealed_articles = repealed_absent = 0
+        for item in repealed:
+            norm = item.get("norm_name") or norm_law_name(item["law_name"])
+            n_ver, n_art = mark_law_repealed(conn, item)
+            if not n_ver:
+                repealed_absent += 1    # 本地没装这部法，或早已标失效
+                continue
+            repealed_laws += 1
+            repealed_articles += n_art
+            touched.append(norm)
+
         if delta.get("data_cutoff"):
             meta_set(conn, "data_cutoff", delta["data_cutoff"])
         meta_set(conn, "updated_at", now_iso())
@@ -141,6 +193,8 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
 
     say(f"已更新到 {to_v}：应用 {applied} 部（{articles} 条正文），"
         f"原样跳过 {unchanged} 部")
+    if repealed_laws:
+        say(f"  另有 {repealed_laws} 部整部废止，{repealed_articles} 条正文已标失效")
     if delta.get("data_cutoff"):
         say(f"  条文截至 {delta['data_cutoff']}")
     say(f"自检：{'通过' if report['ok'] else '发现问题'}")
@@ -154,6 +208,9 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
         "applied": applied,
         "unchanged": unchanged,
         "articles": articles,
+        "repealed": repealed_laws,
+        "repealed_articles": repealed_articles,
+        "repealed_absent": repealed_absent,
         "problems": report["problems"],
     }
 

@@ -67,6 +67,8 @@ def dump_law(conn: sqlite3.Connection, norm_name: str) -> list[dict]:
         用户就看不到已经公布的修订。
     按公布日升序返回，apply 端先落旧版再落新版，supersede 的顺序才不需要
     额外判断（新版若是 pending，supersede_old 本来也不会作废旧版）。
+
+    整部法被废止时这里返回空（它没有现行版），由 dump_repealed 单独处理。
     """
     versions = conn.execute(
         "SELECT * FROM law_versions WHERE norm_name=? AND status IN ('effective', 'pending') "
@@ -114,6 +116,69 @@ def dump_law(conn: sqlite3.Connection, norm_name: str) -> list[dict]:
             "articles": articles,
         })
     return out
+
+
+def is_repealed(conn: sqlite3.Connection, norm_name: str) -> bool:
+    """这部法是不是整部废止了：一条现行版、一条待生效版都不剩。"""
+    row = conn.execute(
+        "SELECT SUM(status IN ('effective', 'pending')) FROM law_versions WHERE norm_name=?",
+        (norm_name,),
+    ).fetchone()
+    return bool(row) and not (row[0] or 0)
+
+
+def list_all_repealed(conn: sqlite3.Connection) -> list[str]:
+    """全库扫出整部废止的法规。扫全库而不只看账本：废止是累积事实，
+    账本只记「改过哪几部」，一条现行版都不剩的法未必进过账本。"""
+    return [r[0] for r in conn.execute(
+        "SELECT norm_name FROM law_versions GROUP BY norm_name "
+        "HAVING SUM(status IN ('effective', 'pending')) = 0 ORDER BY norm_name"
+    ).fetchall()]
+
+
+def dump_repealed(conn: sqlite3.Connection, norm_name: str) -> dict | None:
+    """整部废止的法规只导一条标记，**不带正文**。
+
+    用户本地若已有这部法，apply 端要把它降级、条文标废止；本地没有就什么都
+    不用做——没人需要在自己库里「新增一部已废止的法」。所以正文一个字节都
+    不必传：这 44 部合计 2550 条正文，塞进包会把 1.4 MB 撑到 5 MB 以上，
+    而 apply 端一个字都用不上。
+
+    废止日期和依据记在 law_articles 上（law_versions 没有这两列），取最新
+    版本里任一条非空记录即可——同一部法的所有条文是同一批标的。
+    """
+    ver = conn.execute(
+        "SELECT id, law_name, norm_name, law_type, law_type_label, publish_date, "
+        "       effective_date, issuing_authority, source_file "
+        "FROM law_versions WHERE norm_name=? "
+        "ORDER BY COALESCE(publish_date, '') DESC, id DESC LIMIT 1",
+        (norm_name,),
+    ).fetchone()
+    if ver is None:
+        return None
+
+    mark = conn.execute(
+        "SELECT repeal_date, repeal_reason FROM law_articles "
+        "WHERE version_id=? AND repeal_date IS NOT NULL AND repeal_date != '' LIMIT 1",
+        (ver["id"],),
+    ).fetchone()
+    n_articles = conn.execute(
+        "SELECT COUNT(*) FROM law_articles WHERE version_id=?", (ver["id"],)
+    ).fetchone()[0]
+
+    return {
+        "kind": "repealed",
+        "law_name": ver["law_name"],
+        "norm_name": ver["norm_name"],
+        "law_type": ver["law_type"],
+        "law_type_label": ver["law_type_label"],
+        "publish_date": ver["publish_date"],
+        "effective_date": ver["effective_date"],
+        "issuing_authority": ver["issuing_authority"],
+        "repeal_date": (mark["repeal_date"] if mark else "") or "",
+        "repeal_reason": (mark["repeal_reason"] if mark else "") or "",
+        "article_count": n_articles,
+    }
 
 
 def merge_plan(ledger: dict, plan_path: str) -> tuple[int, int, int]:
@@ -188,13 +253,20 @@ def main() -> None:
     for norm in sorted(ledger["laws"]):
         dumps = dump_law(conn, norm)
         if not dumps:
-            missing.append(norm)
+            # 账本里有、但一条现行版都不剩的，不是「丢了」，是废止了，
+            # 交给下面的全库废止扫描，别报成缺失吓人
+            if not is_repealed(conn, norm):
+                missing.append(norm)
             continue
         for law in dumps:
             if not law["articles"]:
                 empty.append(norm)
                 continue
             laws.append(law)
+
+    # 整部废止单独扫全库：这类法进不了上面的循环（没有现行版可取），
+    # 但如果只靠全量包传播，走增量的用户会永远留着一部已废止的「现行法」。
+    repealed = [x for x in (dump_repealed(conn, n) for n in list_all_repealed(conn)) if x]
     conn.close()
 
     if missing:
@@ -204,21 +276,23 @@ def main() -> None:
         print(f"警告：{len(empty)} 部切不出条文，未进包：{', '.join(empty[:8])}"
               + (" …" if len(empty) > 8 else ""))
 
-    if not laws:
+    if not laws and not repealed:
         raise SystemExit("一部法规都没取到，拒绝生成空包。")
 
     total_articles = sum(len(x["articles"]) for x in laws)
     delta = {
-        "schema": 2,
+        "schema": 3,
         "min_version": ledger["min_version"],
         "to_version": to_version,
         "data_cutoff": data_cutoff,
         "generated_at": date.today().isoformat(),
         "ledger_since": ledger.get("since", ""),
         "laws": laws,
+        "repealed": repealed,
         "summary": {
             "laws": len(laws),
             "articles": total_articles,
+            "repealed": len(repealed),
         },
     }
 
@@ -230,6 +304,9 @@ def main() -> None:
     pending_n = sum(1 for x in laws if (x.get("effective_date") or "") > date.today().isoformat())
     print(f"累积增量包：{args.out}")
     print(f"  {len(laws)} 条版本 / {total_articles} 条正文 ｜ {size_mb:.1f} MB 未压缩")
+    if repealed:
+        n_art = sum(x["article_count"] for x in repealed)
+        print(f"  另含 {len(repealed)} 部整部废止（{n_art} 条正文随之失效，只带标记不带正文）")
     if pending_n:
         print(f"  其中 {pending_n} 条是待生效版本（带进包，用户那天翻成现行）")
     print(f"  适用：本地版本 ≥ {ledger['min_version']}（更早的会回落全量）")
