@@ -119,6 +119,12 @@ make_release.py → 全量库 .db.zst + 增量包 .json.zst + manifest.json（�
 老用户升级路径：下增量包（几 KB 到几 MB）→ `apply_delta.py` → 秒级完成。
 新用户路径：下全量库（数百 MB 级）→ 解开即用。
 
+用户侧怎么知道有新包：`tools/check_update.py`。命令行、网页提示条
+（`/api/law/update-status`）、macOS 双击脚本三个入口共用这一份判断逻辑，
+不各写一套 —— 两边各写，迟早出现「网页说有新版、命令行说没有」。
+它读 Release 的 `manifest.json` 比 `corpus_version`；程序版本另走 tag `app-v*`，
+两者刻意分开：程序改个错别字不该逼用户重下 600 MB 数据包。
+
 Release tag 建议统一为 `data-YYYY.MM.DD`，保留最近三个版本，旧的标记 deprecated 而非删除，
 避免老用户手上的 manifest 指向空。
 
@@ -161,6 +167,9 @@ python tools/diff_articles.py --inbox inbox/
 # 打完补丁发版
 python tools/make_delta.py --plan reports/changes-xxx.plan.json --db data/law_data.db --out dist/delta-x.json
 python tools/make_release.py --db data/law_data.db --delta dist/delta-x.json --out-dir dist/
+
+# 发版后自查：线上看到的版本对不对（用户视角的那条路径）
+python tools/check_update.py --json
 ```
 
 ---

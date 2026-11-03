@@ -20,9 +20,60 @@
 
 from __future__ import annotations
 
+import datetime
 import math
 import re
 import sqlite3
+
+
+def _today() -> str:
+    return datetime.date.today().isoformat()
+
+
+def dedupe_versions(items: list[dict]) -> list[dict]:
+    """同一条文只留一版：现行 > 已公布未生效 > 历史版本。
+
+    新版公布后、施行前，库里同一条号会同时存在两版正文。检索若原样返回，
+    同一条文会出现两次、文字还不同；k 只有 10 条时更会挤掉真正相关的结果。
+    保留首次出现的名次，不打乱相关性顺序。
+    """
+    def rank(it: dict) -> int:
+        if it.get("is_repealed"):
+            return 2
+        return 1 if it.get("is_pending") else 0
+
+    def key(it: dict) -> tuple:
+        return (it.get("law_name") or "", it.get("article_number") or "",
+                it.get("article_suffix") or "")
+
+    best: dict[tuple, int] = {}
+    for it in items:
+        k, r = key(it), rank(it)
+        if k not in best or r < best[k]:
+            best[k] = r
+
+    out: list[dict] = []
+    kept: set[tuple] = set()
+    for it in items:
+        k = key(it)
+        if k in kept or best[k] != rank(it):
+            continue
+        kept.add(k)
+        out.append(it)
+    return out
+
+
+def status_rank(alias: str = "") -> str:
+    """同一条文取哪一版：现行 > 已公布未生效 > 已废止。
+
+    一部法在库里可以同时躺着两版：新版已公布未生效（pending）、旧版仍在
+    施行（effective）。只按 id 倒序取，拿到的是明年才生效的那一版 —— 律师
+    今天写意见书就会引来还没施行的条文。所以排序必须先看状态，再看 id。
+    """
+    p = f"{alias}." if alias else ""
+    return (f"CASE WHEN {p}status IS NULL OR {p}status='effective' THEN 0 "
+            f"WHEN {p}status='pending' THEN 1 ELSE 2 END")
+
 
 # ============================================================
 # 中文数字与条号解析
@@ -183,6 +234,12 @@ def expand_citation(citation: str) -> list:
 def row_to_item(r, score: float = 0.0) -> dict:
     """把一行法条记录转成统一返回结构（含时效状态，供前端标注旧版本）。"""
     status = r["status"] or "effective"
+    effective_date = r["effective_date"] or ""
+    # 兜底：库里标 pending 但施行日已过，按现行有效返回。
+    # 正常情况 ingest/schema.py 的 refresh_pending_status 已经校正过，
+    # 这里再算一遍是防「用 sqlite 直接改库、没走 ensure_schema」的情况。
+    if status == "pending" and effective_date and effective_date <= _today():
+        status = "effective"
     return {
         "law_name": r["law_name"],
         "law_type": r["law_type"],
@@ -194,8 +251,10 @@ def row_to_item(r, score: float = 0.0) -> dict:
         "section": r["section"],
         "content": r["content"],
         "publish_date": r["publish_date"] or "",
-        "effective_date": r["effective_date"] or "",
+        "effective_date": effective_date,
         "status": status,
+        # 已公布未生效：条文全文可查，但不能当现行依据引用
+        "is_pending": status == "pending",
         "is_repealed": status == "repealed",
         "repeal_date": r["repeal_date"] or "",
         "replaced_by": r["replaced_by"] or "",
@@ -254,6 +313,7 @@ def _build_verify_result(
     source_citation: str = "",
 ) -> dict:
     """构建校验结果，确保所有字段都返回。"""
+    pending = status == "pending"
     return {
         "law_name": law_name,
         "article_number": article_number,
@@ -262,6 +322,14 @@ def _build_verify_result(
         "actual_content": actual_content,
         "error": error,
         "status": status,
+        # 已公布未生效：引文本身与库内文本一致（verified 仍为 True），
+        # 但绝不能当现行依据引用。给 agent 和前端一个明确的字段，别让它自己猜。
+        "is_pending": pending,
+        "warning": (
+            f"该条文已公布但尚未生效，{effective_date} 起施行，不得作为现行有效依据引用"
+            if pending and effective_date else
+            ("该条文已公布但尚未生效，不得作为现行有效依据引用" if pending else None)
+        ),
         "effective_date": effective_date,
         "repeal_date": repeal_date,
         "repeal_reason": repeal_reason,
@@ -340,7 +408,7 @@ class LawStore:
                           is_principle_clause, source_file
                    FROM law_articles
                    WHERE law_name = ? AND article_number_num = ?{history_filter}{suffix_filter}
-                   ORDER BY CASE WHEN status = 'repealed' THEN 1 ELSE 0 END, id DESC
+                   ORDER BY {status_rank()}, id DESC
                    LIMIT 1""",
                 (name_to_try, article_num, *suffix_args),
             ).fetchone()
@@ -356,7 +424,7 @@ class LawStore:
                    FROM law_articles
                    WHERE (law_name LIKE ? OR law_name LIKE ?)
                      AND article_number_num = ?{history_filter}{suffix_filter}
-                   ORDER BY CASE WHEN status = 'repealed' THEN 1 ELSE 0 END, LENGTH(law_name) ASC
+                   ORDER BY {status_rank()}, LENGTH(law_name) ASC
                    LIMIT 5""",
                 (f"%{normalized_name}%", f"%{original_name}%", article_num, *suffix_args),
             ).fetchall()
@@ -450,7 +518,7 @@ class LawStore:
                        a.status, a.source_file, a.issuing_authority
                 FROM law_articles a
                 WHERE a.law_name = ?{history}
-                ORDER BY CASE WHEN a.status = 'repealed' THEN 1 ELSE 0 END, a.id DESC
+                ORDER BY {status_rank('a')}, a.id DESC
                 LIMIT 1""",
             (exact_name,),
         ).fetchone()
@@ -583,7 +651,9 @@ class LawStore:
                 ).fetchall()
                 if rows:
                     # bm25 越小越相关，转成正向 0~1 分数便于展示
-                    return [row_to_item(r, round(1.0 / (1.0 + abs(r["rank"])), 4)) for r in rows]
+                    return dedupe_versions(
+                        [row_to_item(r, round(1.0 / (1.0 + abs(r["rank"])), 4)) for r in rows]
+                    )
             except Exception:  # noqa: BLE001
                 # FTS 表缺失或语法异常时静默降级，不让检索整体失败
                 pass
@@ -597,7 +667,7 @@ class LawStore:
             (f"%{q}%", f"%{q}%", *params, k),
         ).fetchall()
         if rows:
-            return [row_to_item(r) for r in rows]
+            return dedupe_versions([row_to_item(r) for r in rows])
 
         # 3) 片段兜底
         terms = match_terms(q)
@@ -615,7 +685,7 @@ class LawStore:
                     LIMIT ?""",
                 (*[f"%{x}%" for x in terms], *params, need, k),
             ).fetchall()
-            return [row_to_item(r, round(r["hits"] / n, 4)) for r in rows]
+            return dedupe_versions([row_to_item(r, round(r["hits"] / n, 4)) for r in rows])
 
         return []
 
@@ -657,7 +727,7 @@ class LawStore:
                 LIMIT ?""",
             (*args, *params, k),
         ).fetchall()
-        return [row_to_item(r) for r in rows]
+        return dedupe_versions([row_to_item(r) for r in rows])
 
     def list_laws(self, q: str = "", k: int = 20, law_type: str | None = None) -> list[dict]:
         """按法名列出法规（带条数），用于让 agent 先确认到底查哪一部。"""
@@ -749,7 +819,7 @@ class LawStore:
                    WHERE (law_name LIKE ? OR law_name LIKE ?)
                      AND article_number_num = ?{history_filter}{suffix_filter}
                    ORDER BY CASE WHEN law_name = ? OR law_name = ? THEN 0 ELSE 1 END,
-                            LENGTH(law_name) ASC""",
+                            {status_rank()}, LENGTH(law_name) ASC""",
                 (f"%{normalized}%", f"%{law_name}%", article_num, *suffix_args,
                  normalized, law_name),
             ).fetchall()
@@ -769,14 +839,18 @@ class LawStore:
             row = selected_rows[0]
             same_law = [r for r in selected_rows if r["law_name"] == row["law_name"]]
             versions = {(r["version_id"], r["publish_date"] or "") for r in same_law}
+            row_status = row["status"] or "effective"
+            row_eff = row["effective_date"] or ""
+            if row_status == "pending" and row_eff and row_eff <= _today():
+                row_status = "effective"
             results.append(_build_verify_result(
                 law_name=row["law_name"],
                 article_number=row["article_number"],
                 article_suffix=row["article_suffix"] or "",
                 verified=True,
                 actual_content=row["content"],
-                status=row["status"] or "effective",
-                effective_date=row["effective_date"] or "",
+                status=row_status,
+                effective_date=row_eff,
                 repeal_date=row["repeal_date"] or "",
                 repeal_reason=row["repeal_reason"] or "",
                 replaced_by=row["replaced_by"] or "",
@@ -798,18 +872,31 @@ class LawStore:
         """库统计。老库没有 law_versions 时自动降级为条文表口径。"""
         out: dict = {}
         out["articles_total"] = self.conn.execute("SELECT COUNT(*) FROM law_articles").fetchone()[0]
-        out["articles_effective"] = self.conn.execute(
-            "SELECT COUNT(*) FROM law_articles WHERE status IS NULL OR status != 'repealed'"
+        # pending 必须单独扣出来：算进 effective 会让「现行有效条文数」虚高，
+        # 而这个数会直接写进 README、MCP 返回和对外文案。
+        out["articles_pending"] = self.conn.execute(
+            "SELECT COUNT(*) FROM law_articles WHERE status = 'pending'"
         ).fetchone()[0]
-        out["articles_repealed"] = out["articles_total"] - out["articles_effective"]
+        out["articles_effective"] = self.conn.execute(
+            "SELECT COUNT(*) FROM law_articles "
+            "WHERE status IS NULL OR status NOT IN ('repealed','pending')"
+        ).fetchone()[0]
+        out["articles_repealed"] = (
+            out["articles_total"] - out["articles_effective"] - out["articles_pending"]
+        )
 
         if self._has_table("law_versions"):
             out["law_versions"] = self.conn.execute("SELECT COUNT(*) FROM law_versions").fetchone()[0]
             out["laws"] = self.conn.execute(
                 "SELECT COUNT(DISTINCT norm_name) FROM law_versions WHERE status = 'effective'"
             ).fetchone()[0]
+            # 含未生效的法规数：用户问「库里有多少部法」时，pending 也算收了
+            out["laws_pending"] = self.conn.execute(
+                "SELECT COUNT(DISTINCT norm_name) FROM law_versions WHERE status = 'pending'"
+            ).fetchone()[0]
         else:
             out["law_versions"] = 0
+            out["laws_pending"] = 0
             out["laws"] = self.conn.execute(
                 "SELECT COUNT(DISTINCT law_name) FROM law_articles"
             ).fetchone()[0]

@@ -19,7 +19,19 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# 法规/条文时效状态：
+#   effective  现行有效
+#   pending    已公布、尚未生效（施行日在今天之后）
+#   superseded 已被更新版本取代（版本级，旧版全文仍保留供旧法适用）
+#   repealed   已废止（条文级）
+# pending 是第三版新增。缺了它，一部明年才施行的法会被标成「现行有效」，
+# 律师据此写进意见书就是引用了还没生效的条文 —— 这是硬伤，不是显示问题。
+STATUS_EFFECTIVE = "effective"
+STATUS_PENDING = "pending"
+STATUS_SUPERSEDED = "superseded"
+STATUS_REPEALED = "repealed"
 
 _CN_SUFFIX = re.compile(r"^之([零〇一二三四五六七八九十]+)[\s\u3000]*")
 
@@ -149,6 +161,93 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def initial_status(effective_date: str | None, today: str | None = None) -> str:
+    """入库时该给什么状态。
+
+    施行日在今天之后 → pending（已公布未生效）。没有施行日期时按 effective：
+    源数据里缺施行日期的，绝大多数是早已施行的老法规，按 pending 存反而会漏检索。
+    """
+    eff = (effective_date or "").strip()
+    if not eff:
+        return STATUS_EFFECTIVE
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    return STATUS_PENDING if eff > today else STATUS_EFFECTIVE
+
+
+def _supersede_stale_versions(conn: sqlite3.Connection, today: str) -> int:
+    """同一部法同时存在多个现行版本时，只留最新的一个，其余降级并作废条文。
+
+    这是「新版到施行日才算取代旧版」的落点：调进来之前 pending 已经翻成
+    effective，所以这里降级的都是「确实已经被新版顶掉」的旧版，不会误伤
+    还没生效的新版（它那一刻还是 pending，不在此列）。
+    返回改动的行数（版本 + 条文）。
+    """
+    norms = conn.execute(
+        "SELECT norm_name FROM law_versions WHERE status=? "
+        "GROUP BY norm_name HAVING COUNT(*) > 1",
+        (STATUS_EFFECTIVE,),
+    ).fetchall()
+    changed = 0
+    for row in norms:
+        norm = row[0]
+        rows = conn.execute(
+            "SELECT id, law_name, effective_date FROM law_versions "
+            "WHERE norm_name=? AND status=? "
+            "ORDER BY COALESCE(publish_date,'') DESC, id DESC",
+            (norm, STATUS_EFFECTIVE),
+        ).fetchall()
+        keep_id, keep_name, keep_eff = rows[0][0], rows[0][1], (rows[0][2] or "")
+        for old in rows[1:]:
+            changed += conn.execute(
+                "UPDATE law_versions SET status=?, superseded_by=?, superseded_at=? WHERE id=?",
+                (STATUS_SUPERSEDED, keep_id, now_iso(), old[0]),
+            ).rowcount
+            changed += conn.execute(
+                "UPDATE law_articles SET status=?, repeal_date=?, replaced_by=?, repeal_reason=? "
+                "WHERE version_id=? AND (status IS NULL OR status != ?)",
+                (STATUS_REPEALED, keep_eff or today, keep_name, "被新修订版本取代",
+                 old[0], STATUS_REPEALED),
+            ).rowcount
+    return changed
+
+
+def refresh_pending_status(conn: sqlite3.Connection, today: str | None = None) -> int:
+    """按当天日期校正 pending / effective，返回改动条数。
+
+    为什么必须有这一步：status 是入库那一刻的快照，而日期一直在往前走。
+    《医疗保障法》入库时标 pending，到了 2027-01-01 它就该是现行有效了。
+    只靠入库判定，库会越用越旧、越旧越错。
+
+    反方向（effective 但施行日在未来）也要处理：老库第一次升级到 schema 3 时，
+    里面已经有一批「明年才施行却标着现行有效」的版本。
+
+    ★ 单向的日期比对不够：新版翻成 effective 的那一刻，同名的旧版必须同时
+    降级，否则这部法会有两个现行版本；反过来，新版还 pending 的时候绝不能
+    动旧版 —— 那段时间旧版才是律师该引的文本。
+    """
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    changed = 0
+    changed += conn.execute(
+        "UPDATE law_versions SET status=? WHERE status=? AND effective_date != '' AND effective_date <= ?",
+        (STATUS_EFFECTIVE, STATUS_PENDING, today),
+    ).rowcount
+    changed += conn.execute(
+        "UPDATE law_versions SET status=? WHERE status=? AND effective_date != '' AND effective_date > ?",
+        (STATUS_PENDING, STATUS_EFFECTIVE, today),
+    ).rowcount
+    changed += conn.execute(
+        "UPDATE law_articles SET status=? WHERE status=? AND effective_date != '' AND effective_date <= ?",
+        (STATUS_EFFECTIVE, STATUS_PENDING, today),
+    ).rowcount
+    changed += conn.execute(
+        "UPDATE law_articles SET status=? WHERE status=? AND effective_date != '' AND effective_date > ?",
+        (STATUS_PENDING, STATUS_EFFECTIVE, today),
+    ).rowcount
+    # 上面四步做完，pending 已到期的版本已是 effective，此时才允许降级旧版
+    changed += _supersede_stale_versions(conn, today)
+    return changed
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """幂等建表 + 老库补列。可在任意版本库上反复执行。"""
     conn.executescript(CREATE_ARTICLES_SQL)
@@ -183,8 +282,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_articles_law_num "
         "ON law_articles(law_name, article_number_num)"
     )
+    # 必须用 upsert：INSERT OR IGNORE 在老库上不会更新已存在的键，
+    # 结果就是代码升到 schema 3 了、库里还写着 2，靠 schema_version 做的判断全部失效。
     conn.execute(
-        "INSERT OR IGNORE INTO corpus_meta(key, value) VALUES ('schema_version', ?)",
+        "INSERT INTO corpus_meta(key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (str(SCHEMA_VERSION),),
     )
     conn.execute(
@@ -196,6 +298,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO corpus_meta(key, value) VALUES ('data_cutoff', '')"
     )
+    # 状态随日期漂移，每次打开库就地校正一次。只扫 status='pending' 的小集合、
+    # 走 idx_versions_status，代价可以忽略；换来的是「查到的时效状态永远对得上今天」。
+    refresh_pending_status(conn)
     conn.commit()
 
 

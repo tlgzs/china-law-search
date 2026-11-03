@@ -19,6 +19,7 @@ import os
 import re
 import sqlite3
 import sys
+import uuid
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,7 +91,10 @@ def apply_delta_file(delta_path: str, db: str, force: bool = False,
 
     applied = unchanged = articles = 0
     touched: list[str] = []
-    batch_id = "delta-" + now_iso()
+    # now_iso() 只到秒。同一秒内重跑（用户连点两次更新、脚本失败重试）会撞
+    # ingest_batches 主键直接抛 IntegrityError，幂等承诺就断了。补一段随机后缀：
+    # 批次号本来就是给人看日志用的，不承担排序职责。
+    batch_id = "delta-" + now_iso() + "-" + uuid.uuid4().hex[:6]
 
     # 插入放在一个事务里：中途出错整批回滚，不会留下半部法规
     with conn:

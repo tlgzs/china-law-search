@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -32,9 +33,12 @@ sys.path.insert(0, _HERE)
 
 from diff_articles import build_plan, render_html  # noqa: E402
 from schema import (  # noqa: E402
+    STATUS_PENDING,
     create_fts,
     ensure_schema,
+    initial_status,
     meta_get,
+    meta_set,
     now_iso,
     norm_law_name,
     bump_corpus_version,
@@ -89,6 +93,10 @@ def convert_inbox(inbox: str) -> list[str]:
 
 
 def insert_new_version(conn: sqlite3.Connection, law: dict, batch_id: str) -> int:
+    # 施行日在今天之后的标 pending，不能一律写 effective。
+    # 源数据里已经出现「公布于 2026-08、2027-01-01 才施行」的法，
+    # 一律标现行有效等于让人提前引用未生效条文。
+    version_status = initial_status(law.get("effective_date"))
     cur = conn.execute(
         """INSERT INTO law_versions
            (law_name, norm_name, law_type, law_type_label, publish_date, effective_date,
@@ -97,7 +105,7 @@ def insert_new_version(conn: sqlite3.Connection, law: dict, batch_id: str) -> in
         (
             law["law_name"], law["norm_name"], law.get("law_type"), law.get("law_type_label"),
             law["publish_date"], law["effective_date"], law.get("issuing_authority"),
-            law["source_file"], law["sha256"], len(law["articles"]), "effective", batch_id, now_iso(),
+            law["source_file"], law["sha256"], len(law["articles"]), version_status, batch_id, now_iso(),
         ),
     )
     version_id = int(cur.lastrowid)
@@ -114,7 +122,7 @@ def insert_new_version(conn: sqlite3.Connection, law: dict, batch_id: str) -> in
                 a["article_number"], a["article_number_num"], a.get("article_suffix", ""),
                 a.get("chapter"), a.get("section"), a["content"], a["content"],
                 a["content_hash"], a.get("publish_date"), a.get("effective_date"),
-                a.get("issuing_authority"), "effective", a["source_file"],
+                a.get("issuing_authority"), initial_status(a.get("effective_date")), a["source_file"],
             )
             for a in law["articles"]
         ],
@@ -129,7 +137,15 @@ def supersede_old(conn: sqlite3.Connection, law: dict, new_version_id: int) -> i
     那个 id 是「打包这份计划的那台机器」上的行号，到了用户本地库可能已经是
     另一部完全无关的法规。照它去 UPDATE，会把无关法规整部作废且没有任何报错。
     增量包本来就是跨库传递的，任何自增主键都不该跟着走。
+
+    ★ 新版还没到施行日（pending）时一律不动旧版：此刻旧版仍是现行有效，
+    提前降级会让这部法在当前库里「一条可用正文都不剩」，检索只能拿到明年才
+    施行的文本。真正的降级由 ingest.schema.refresh_pending_status() 在施行日
+    当天完成。
     """
+    if initial_status(law.get("effective_date")) == STATUS_PENDING:
+        return 0
+
     norm = law.get("norm_name") or norm_law_name(law["law_name"])
     pub = law.get("publish_date") or ""
     old_ids = [
@@ -208,6 +224,21 @@ def apply_plan(db_path: str, plan_path: str, approve: bool, vectors: bool, force
         create_fts(conn)
         version = bump_corpus_version(conn)
 
+        # data_cutoff / snapshot_date 原来只有 apply_delta 会写，本地入库这条路上
+        # 完全没人写 —— 结果入库了 10 月的法规，页脚还显示「条文截至 9 月」。
+        # 这两个字段是用户判断「这份数据新不新」的唯一依据，必须跟着入库走。
+        cutoff = conn.execute(
+            "SELECT MAX(publish_date) FROM law_versions "
+            "WHERE publish_date IS NOT NULL AND publish_date != ''"
+        ).fetchone()[0] or ""
+        # 未来日期是脏数据（正文里的期限被误当公布日），不能拿它顶高截止日
+        today = datetime.date.today().isoformat()
+        if cutoff > today:
+            cutoff = today
+        meta_set(conn, "data_cutoff", cutoff)
+        meta_set(conn, "snapshot_date", today)
+        conn.commit()
+
     verify = verify_db(conn, touched)
     conn.close()
 
@@ -236,6 +267,14 @@ def verify_db(conn: sqlite3.Connection, touched: list[str]) -> dict:
         version = conn.execute(
             "SELECT * FROM law_versions WHERE norm_name=? AND status='effective' "
             "ORDER BY COALESCE(publish_date,'') DESC, id DESC LIMIT 1", (norm,)).fetchone()
+        if version is None:
+            # 全新法可能整部都还在待生效期（如 2027-01-01 才施行的法律），
+            # 这时「没有生效版本」是正确状态而非缺陷——库里确实一条现行条文
+            # 都不该有。拿待生效版接着做条数与空正文自检，只有连待生效版都
+            # 找不到，才算这部法根本没入库。
+            version = conn.execute(
+                "SELECT * FROM law_versions WHERE norm_name=? AND status='pending' "
+                "ORDER BY COALESCE(publish_date,'') DESC, id DESC LIMIT 1", (norm,)).fetchone()
         if version is None:
             problems.append(f"{norm}: 无生效版本")
             continue

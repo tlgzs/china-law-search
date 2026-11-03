@@ -130,46 +130,77 @@ def decompress(src: str, dest: str) -> None:
 
 # ---------------------------------------------------------------- 下载
 
-def download(url: str, dest: str, label: str = "") -> None:
-    """流式下载并显示进度。终端里单行刷新，重定向到文件时每 10% 打一行。"""
+# 资产名 → api.github.com 的资产地址。
+# browser_download_url 走 github.com/releases/download/…，而只放行 api 域名的网络
+# （企业代理、部分校园网）会把这条打回超时，此时用 API 资产接口 + octet-stream
+# 能拿到同样的字节。fetch_manifest 每次刷新这张表。
+_ASSET_API: dict[str, str] = {}
+
+
+def _asset_api_request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        # 必须 octet-stream：默认的 vnd.github+json 会返回资产的元数据 JSON，
+        # 而不是文件本身。
+        "Accept": "application/octet-stream",
+    })
+
+
+def _stream(url: str, dest: str, label: str, req: urllib.request.Request) -> None:
+    """流式写盘并显示进度。失败原样抛出，由调用方决定要不要换路重试。"""
     tty = sys.stdout.isatty()
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        total = int(resp.headers.get("Content-Length") or 0)
+        done = 0
+        t0 = time.time()
+        shown = -1
+        with open(dest, "wb") as f:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                pct = int(done * 100 / total) if total else 0
+                if tty:
+                    speed = done / max(time.time() - t0, 0.001)
+                    bar = "#" * (pct // 4)
+                    sys.stdout.write(
+                        f"\r  {label} [{bar:<25}] {pct:>3}%  {_human(done)}"
+                        f"{'/' + _human(total) if total else ''}  {_human(speed)}/s   "
+                    )
+                    sys.stdout.flush()
+                elif pct >= shown + 10:
+                    shown = pct - pct % 10
+                    print(f"  {label} {shown}%  {_human(done)}", flush=True)
+        if tty:
+            sys.stdout.write("\n")
+
+
+def download(url: str, dest: str, label: str = "") -> None:
+    """下载到 dest。第一跳失败时换 API 资产地址再试一次。"""
     try:
-        with urllib.request.urlopen(_request(url), timeout=60) as resp:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            t0 = time.time()
-            shown = -1
-            with open(dest, "wb") as f:
-                while True:
-                    chunk = resp.read(1 << 20)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    done += len(chunk)
-                    pct = int(done * 100 / total) if total else 0
-                    if tty:
-                        speed = done / max(time.time() - t0, 0.001)
-                        bar = "#" * (pct // 4)
-                        sys.stdout.write(
-                            f"\r  {label} [{bar:<25}] {pct:>3}%  {_human(done)}"
-                            f"{'/' + _human(total) if total else ''}  {_human(speed)}/s   "
-                        )
-                        sys.stdout.flush()
-                    elif pct >= shown + 10:
-                        shown = pct - pct % 10
-                        print(f"  {label} {shown}%  {_human(done)}", flush=True)
-            if tty:
-                sys.stdout.write("\n")
+        _stream(url, dest, label, _request(url))
+        return
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"下载失败（HTTP {e.code}）：{url}\n{e.reason}")
+        first_err: BaseException = SystemExit(f"下载失败（HTTP {e.code}）：{url}\n{e.reason}")
     except urllib.error.URLError as e:
-        raise SystemExit(
+        first_err = SystemExit(
             f"连不上 {url}\n  {e.reason}\n"
             "  国内网络访问 GitHub 常被阻断，可以：\n"
             "    1) 设置代理后重试：export https_proxy=http://127.0.0.1:7890\n"
             "    2) 用浏览器手动下载 Release 附件，再执行：\n"
             "       python3 tools/fetch_data.py --from-file 下载的文件"
         )
+
+    api_url = _ASSET_API.get(label)
+    if not api_url or api_url == url:
+        raise first_err
+    print(f"  {label} 常规地址不通，改用 API 资产接口重试…")
+    try:
+        _stream(api_url, dest, label, _asset_api_request(api_url))
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        raise first_err
 
 
 # ---------------------------------------------------------------- 版本
@@ -234,14 +265,36 @@ def fetch_manifest(repo: str) -> tuple[dict, str]:
         )
 
     assets = {a["name"]: a["browser_download_url"] for a in release.get("assets", [])}
+    _ASSET_API.clear()
+    for a in release.get("assets", []):
+        if a.get("name") and a.get("url"):
+            _ASSET_API[a["name"]] = a["url"]
     if "manifest.json" not in assets:
         raise SystemExit(
             f"{release.get('tag_name')} 这个 Release 里没有 manifest.json，无法判断版本。\n"
             "  请确认选的是数据 Release（tag 形如 data-2026.10.30）。"
         )
-    with urllib.request.urlopen(_request(assets["manifest.json"]), timeout=30) as resp:
-        manifest = json.loads(resp.read().decode("utf-8"))
+    manifest = _read_asset_json("manifest.json", assets["manifest.json"])
     return manifest, assets
+
+
+def _read_asset_json(name: str, url: str) -> dict:
+    """读一个小 JSON 资产（manifest.json，几百字节）。
+
+    优先走 API 资产接口，再走 browser_download_url。顺序是反的，原因在等待时间：
+    github.com 不通的网络上，先试下行地址要干等 30 秒超时才能回退，用户会以为
+    「检查更新卡死了」。API 接口在两种网络下都通，且 manifest 只有几百字节，
+    走 API 没有任何速度损失。大文件相反 —— 下行地址更快，见 download()。
+    """
+    api_url = _ASSET_API.get(name)
+    if api_url and api_url != url:
+        try:
+            with urllib.request.urlopen(_asset_api_request(api_url), timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            pass
+    with urllib.request.urlopen(_request(url), timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def install_from_file(src: str, db: str, expect_sha: str | None) -> None:

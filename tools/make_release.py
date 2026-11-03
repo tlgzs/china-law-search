@@ -31,6 +31,21 @@ sys.path.insert(0, os.path.join(_HERE, "..", "ingest"))
 
 from schema import ensure_schema, meta_get, SCHEMA_VERSION  # noqa: E402
 
+_ROOT = os.path.dirname(_HERE)
+
+
+def app_version() -> str:
+    """程序版本，取自仓库根目录 VERSION。
+
+    写进 manifest 是为了让已装的用户能一眼对上「这份数据包是哪个程序版本发的」，
+    省得出了问题还得翻 release 页面猜。程序新版本的判断走 app-v* tag，不看这个字段。
+    """
+    try:
+        with open(os.path.join(_ROOT, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
 
 def sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -82,11 +97,24 @@ def main() -> None:
 
     os.makedirs(args.out_dir, exist_ok=True)
     db_copy = os.path.join(args.out_dir, f"law_data-{version}.db")
-    shutil.copyfile(args.db, db_copy)
+    # 用硬链接而不是真复制：全量库 2.4 GB，压缩前再复制一份意味着打包要吃掉
+    # 额外 2.4 GB 磁盘——发版机器磁盘紧张时这一步会直接把空间撑爆。硬链接和
+    # 原库指向同一份数据块，不占空间，压完删链接也不影响原库。
+    # 跨文件系统（比如 output 指到外置盘）时硬链接会失败，退回真复制。
+    try:
+        if os.path.exists(db_copy):
+            os.remove(db_copy)
+        os.link(args.db, db_copy)
+        linked = True
+    except OSError:
+        shutil.copyfile(args.db, db_copy)
+        linked = False
     for suffix in ("-wal", "-shm"):
         side = args.db + suffix
         if os.path.exists(side):
             print(f"提示：{side} 存在，建议先执行 VACUUM 再打包")
+    if not linked:
+        print("提示：硬链接不可用（跨文件系统），已改为复制，注意预留磁盘空间")
 
     db_archs = compress(db_copy, args.out_dir)
     db_sha = sha256(db_copy)
@@ -133,6 +161,7 @@ def main() -> None:
     manifest = {
         "schema": 1,
         "schema_version": SCHEMA_VERSION,
+        "app_version": app_version(),
         "corpus_version": version,
         "updated_at": updated_at,
         "law_count": laws,

@@ -7,6 +7,8 @@ reports/
 dist/
 # 原始截图存档；README 用的是 docs/images/ 下裁切压缩后的版本
 截图/
+# flk 手动批量下载的原始 docx / zip；入库走 tools/import_flk.py → inbox/，原件不入库
+下载的法条/
 
 # 令牌与日志
 api_keys.json

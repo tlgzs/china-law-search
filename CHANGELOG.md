@@ -4,7 +4,9 @@
 
 - **数据版本** `YYYY.MM.DD.N` —— 变更的是法条内容（新增法规、条文修订、时效变更），
   对应 Release tag `data-YYYY.MM.DD`。
-- **程序版本** —— 变更的是代码。
+- **程序版本** —— 变更的是代码，取自仓库根目录 `VERSION`，对应 Release tag
+  `app-vX.Y.Z`。原来这个数字硬编码在 `FastAPI(...)` 和 `/health` 两处，
+  改版本要记得改两个地方，且没有任何地方记录「远端最新是几版」可供比对。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
@@ -12,6 +14,31 @@
 
 ### 新增
 
+- **一键检查数据与程序有没有新版本**。以前「有没有新版」只能靠自己去 GitHub
+  Releases 页面翻，`fetch_data.py` 虽然能判断版本，但没有任何地方提示「远端最新
+  是哪个」。现在 `tools/check_update.py` 一次报两件事：数据（Release 的
+  `corpus_version` 对比本地 `corpus_version`）与程序（tag `app-v*` 对比 `VERSION`），
+  并说明该走增量还是全量、增量包多大。
+  三种入口都是同一个判断：命令行 `python3 tools/check_update.py [--update]`；
+  macOS 双击 `更新数据.command`（实为 `update.sh`）；网页顶部琥珀色提示条
+  「法规库 2026.11.03.2 → 2026.11.30.1，增量 3.2 MB」，点「立即更新」才装。
+  服务启动时在后台查一次（不阻塞启动、断网不影响用），结果缓存 1 小时
+  （`LAW_UPDATE_CHECK_TTL`），避免每次刷新页面都打 GitHub API。
+  **数据会自己装，程序只提示不动手**——程序更新改的是源码，只能 `git pull`
+  后重启，用户本地可能有未提交改动，自动拉取会冲掉。
+  两个新接口：`GET /api/law/update-status`、`POST /api/law/update-data`，
+  均**只允许本机调用**（经反向代理转发时 `client.host` 是代理地址，会被 403 挡住）。
+  更新用独立锁串行，连点两次返回 409 而不是并发跑两个增量包。
+- **「已公布、尚未生效」状态（`pending`）**。原来只有 `effective` / `superseded`
+  两个版本级状态，入库时一律写 `effective`，结果是一部明年 1 月才施行的法
+  当天就被标成「现行有效」——律所据此写进意见书就是引用了没生效的条文。
+  现在按施行日期与当天比较自动判定：检索结果带琥珀色「尚未生效 · 某日施行」标签，
+  单条查询底部给出黄色提示条，引文核验明确写「条文与库内一致，但尚未生效，
+  不得作现行依据」。MCP 的 `get_article` / `verify_citation` 返回 `is_pending`
+  与 `warning` 字段，agent 不会自己猜。状态随日期自动翻转，到施行日即转
+  `effective`，不需要人工改（`ingest/schema.py:refresh_pending_status`）。
+  升级时顺带把老库里已经存在的 7 部「未来施行却标现行」的法规改了过来。另外
+  7 部是「旧版被提前作废」，属于另一处缺陷，见下方修复第一条。
 - **本地查询界面加了品牌标识**。顶栏放「壹律从简」印章（40×40，从品牌规范页
   直接导出 SVG 再转 PNG，背景透明，不从截图抠图），同一枚章兼作 favicon。
   资源放 `web/brand/`，页面用的是相对路径，HTTP 打开和 `file://` 直接打开都不失效。
@@ -47,6 +74,47 @@
 
 ### 修复
 
+- **增量包会漏掉所有「已公布、待生效」的法规**。`make_delta.py` 只按
+  `status='effective'` 取版本，两类法因此进不了包：一类是全新法（如 2027-01-01
+  才施行的《医疗保障法》），库里一条 `effective` 都没有，被判成「缺失」直接丢掉，
+  用户永远补不到这部法；另一类是旧版仍生效、新版待施行的（如《商标法》），
+  包里只有 2019 年那版，用户看不到已经公布的修订。现在改为按法规导出全部
+  `effective` + `pending` 版本、按公布日升序落库，本次包内 536 条版本里有 42 条
+  是待生效版本，到施行日由 `refresh_pending_status` 自动翻成现行。
+  连带修两处：`verify_db()` 把「整部法都还在待生效期」误报成「无生效版本」；
+  `apply_delta.py` 的批次号精确到秒，同一秒重跑会撞 `ingest_batches` 主键
+  抛 `IntegrityError`，把「重复应用不出错」这条承诺打断（现已加随机后缀）。
+- **打包要吃双倍磁盘**。`make_release.py` 压缩前先用 `shutil.copyfile` 复制一份
+  2.4 GB 的全量库，发版机磁盘紧张时这一步会直接把空间撑爆。改用硬链接指向同一份
+  数据块，压完删链接不影响原库；跨文件系统时退回真复制并给出提示。
+- **只放行 `api.github.com` 的网络里，用户侧更新必然失败**。`fetch_manifest()`
+  读完 Release JSON 后，是用 `browser_download_url`（走 `github.com/releases/download/…`）
+  去取 `manifest.json` 的。企业代理、部分校园网只放行 api 域名，第二个请求必然被
+  拦掉，用户看到的是「连不上 GitHub」，与真实原因（只有一个域名不通）不符。
+  现在取 `manifest.json` 先走原地址，失败改走 API 资产接口
+  （`assets[].url` + `Accept: application/octet-stream`）；大文件下载同样在
+  `download()` 里加了这条路，第一跳失败才换，不影响正常网络下的速度。
+  另外 `check_update.py` 在系统代理报 502/407 时会绕开代理重试一次 ——
+  企业内网常常只有代理能出网，所以不能一上来就直连，只能失败后回退。
+- **新版还没生效，旧版就被作废了**（`pending` 状态的伴生缺陷）。`supersede_old()`
+  原来只判断「不是新增」，不看新版的施行日：一部明年 1 月才施行的修订版入库当天，
+  就把仍然有效的旧版降级成 `superseded`、旧条文全标 `repealed`。结果《农业法》
+  《商标法》《审计法实施条例》等 7 部法在当前库里**一条可用正文都不剩**，
+  查「农业法 第一条」返回的是 2027 年才施行的文本。现在改成：新版是 `pending`
+  时一律不动旧版，等施行日当天由 `refresh_pending_status` 完成降级与条文作废。
+  同时补了同一条文的取版顺序（现行 > 已公布未生效 > 历史）和检索结果去重，
+  否则两版并存后按 `id` 倒序会一直取到新版。
+- **存量数据修复工具** `tools/fix_pending_supersede.py`。已入库的坏数据不会自己好，
+  这个脚本按「有 pending 版本却没有 effective 版本」定位，取施行日已过的最近一版
+  恢复为现行并解冻条文。默认只出报告，`--apply` 才写库，可反复跑。
+  本次对官方库修复 7 部法、解冻 372 条。
+- **「现行有效条文数」虚高**。health、`/api/law/stats`、MCP `stats` 三处的计数
+  都是 `status != 'repealed'`，把未生效条文也算了进去。三处口径现已统一为
+  `NOT IN ('repealed','pending')`，并各自单列 `pending` 计数——这个数会直接
+  写进 README、MCP 返回和对外文案，算错就是对外说错。
+- **`schema_version` 永远升不上去**。`ensure_schema` 用的是 `INSERT OR IGNORE`，
+  对已存在的键不更新，导致代码已经是 schema 3、库里还写着 2，凡是靠
+  `schema_version` 做的判断全部失效。已改成 `ON CONFLICT DO UPDATE`。
 - **文档里几处会让人直接踩坑的数字与占位符**。`README` / `CONTRIBUTING` 的 clone 命令
   还写着 `<owner>`，复制粘贴必定失败（改成 `tlgzs`）；tag 示例少了段位号
   （`data-2026.10.31` → `data-2026.10.31.1`）；包体积按 MiB 写成 660 MB，与 GitHub

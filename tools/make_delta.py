@@ -53,57 +53,67 @@ def load_ledger(path: str) -> dict:
         return json.load(f)
 
 
-def dump_law(conn: sqlite3.Connection, norm_name: str) -> dict | None:
-    """把一部法的当前有效版本连同全部条文还原成「计划里那种 law 对象」。
+def dump_law(conn: sqlite3.Connection, norm_name: str) -> list[dict]:
+    """把一部法在库里的现行版本与待生效版本，还原成「计划里那种 law 对象」列表。
 
     结构与 diff_articles.build_plan 产出的条目保持一致，好让 apply 端直接复用
     update.insert_new_version，不必为增量包再写一套插入逻辑。
-    """
-    v = conn.execute(
-        "SELECT * FROM law_versions WHERE norm_name=? AND status='effective' "
-        "ORDER BY COALESCE(publish_date,'') DESC, id DESC LIMIT 1",
-        (norm_name,),
-    ).fetchone()
-    if v is None:
-        return None
 
-    rows = conn.execute(
-        "SELECT * FROM law_articles WHERE version_id=? "
-        "ORDER BY article_number_num, COALESCE(article_suffix,'')",
-        (v["id"],),
+    为什么不是一部法取一条：状态有两层含义，不能只取 effective。
+      · 只有待生效版的新法（如 2027-01-01 才施行的《医疗保障法》），库里
+        一条 effective 都没有，按老写法会被判成「缺失」直接丢掉，用户永远
+        补不到这部法；
+      · 旧版仍生效、新版待施行的法（如《商标法》），两条都得带上，只带旧版
+        用户就看不到已经公布的修订。
+    按公布日升序返回，apply 端先落旧版再落新版，supersede 的顺序才不需要
+    额外判断（新版若是 pending，supersede_old 本来也不会作废旧版）。
+    """
+    versions = conn.execute(
+        "SELECT * FROM law_versions WHERE norm_name=? AND status IN ('effective', 'pending') "
+        "ORDER BY COALESCE(publish_date, '') ASC, id ASC",
+        (norm_name,),
     ).fetchall()
 
-    articles = []
-    for a in rows:
-        articles.append({
-            "law_name": a["law_name"] or v["law_name"],
-            "law_type": a["law_type"] or v["law_type"],
-            "law_type_label": a["law_type_label"] or v["law_type_label"],
-            "article_number": a["article_number"],
-            "article_number_num": a["article_number_num"],
-            "article_suffix": a["article_suffix"] or "",
-            "chapter": a["chapter"],
-            "section": a["section"],
-            "content": a["content"],
-            "content_hash": a["content_hash"],
-            "publish_date": a["publish_date"] or v["publish_date"],
-            "effective_date": a["effective_date"] or v["effective_date"],
-            "issuing_authority": a["issuing_authority"] or v["issuing_authority"],
-            "source_file": a["source_file"] or v["source_file"],
-        })
+    out: list[dict] = []
+    for v in versions:
+        rows = conn.execute(
+            "SELECT * FROM law_articles WHERE version_id=? "
+            "ORDER BY article_number_num, COALESCE(article_suffix, '')",
+            (v["id"],),
+        ).fetchall()
 
-    return {
-        "law_name": v["law_name"],
-        "norm_name": v["norm_name"],
-        "law_type": v["law_type"],
-        "law_type_label": v["law_type_label"],
-        "publish_date": v["publish_date"],
-        "effective_date": v["effective_date"],
-        "issuing_authority": v["issuing_authority"],
-        "source_file": v["source_file"] or f"{v['norm_name']}.md",
-        "sha256": v["file_sha256"] or "",
-        "articles": articles,
-    }
+        articles = []
+        for a in rows:
+            articles.append({
+                "law_name": a["law_name"] or v["law_name"],
+                "law_type": a["law_type"] or v["law_type"],
+                "law_type_label": a["law_type_label"] or v["law_type_label"],
+                "article_number": a["article_number"],
+                "article_number_num": a["article_number_num"],
+                "article_suffix": a["article_suffix"] or "",
+                "chapter": a["chapter"],
+                "section": a["section"],
+                "content": a["content"],
+                "content_hash": a["content_hash"],
+                "publish_date": a["publish_date"] or v["publish_date"],
+                "effective_date": a["effective_date"] or v["effective_date"],
+                "issuing_authority": a["issuing_authority"] or v["issuing_authority"],
+                "source_file": a["source_file"] or v["source_file"],
+            })
+
+        out.append({
+            "law_name": v["law_name"],
+            "norm_name": v["norm_name"],
+            "law_type": v["law_type"],
+            "law_type_label": v["law_type_label"],
+            "publish_date": v["publish_date"],
+            "effective_date": v["effective_date"],
+            "issuing_authority": v["issuing_authority"],
+            "source_file": v["source_file"] or f"{v['norm_name']}.md",
+            "sha256": v["file_sha256"] or "",
+            "articles": articles,
+        })
+    return out
 
 
 def merge_plan(ledger: dict, plan_path: str) -> tuple[int, int, int]:
@@ -137,7 +147,8 @@ def merge_plan(ledger: dict, plan_path: str) -> tuple[int, int, int]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="生成累积增量包")
-    ap.add_argument("--plan", default=None, help="本次变更计划（可选，给了就并入账本）")
+    ap.add_argument("--plan", action="append", default=None,
+                    help="本次变更计划（可选，可重复传多次，按顺序并入同一本账）")
     ap.add_argument("--db", default="./data/law_data.db")
     ap.add_argument("--ledger", default=DEFAULT_LEDGER)
     ap.add_argument("--out", required=True)
@@ -147,8 +158,14 @@ def main() -> None:
     ledger = load_ledger(args.ledger)
 
     if args.plan:
-        added, refreshed, skipped = merge_plan(ledger, args.plan)
-        print(f"账本并入：新增 {added} 部，刷新 {refreshed} 部，忽略 {skipped} 条（skip/stale）")
+        ids = []
+        for plan_path in args.plan:
+            added, refreshed, skipped = merge_plan(ledger, plan_path)
+            print(f"账本并入 {os.path.basename(plan_path)}：新增 {added} 部，刷新 {refreshed} 部，"
+                  f"忽略 {skipped} 条（skip/stale）")
+            ids.append(os.path.basename(plan_path))
+        if len(ids) > 1:
+            print(f"  共 {len(ids)} 份计划并账，账本现有 {len(ledger['laws'])} 部")
 
     if not ledger["laws"]:
         raise SystemExit("账本里没有法规，增量包会是空的。先带 --plan 跑一次把账本建起来。")
@@ -169,18 +186,19 @@ def main() -> None:
     missing = []
     empty = []
     for norm in sorted(ledger["laws"]):
-        law = dump_law(conn, norm)
-        if law is None:
+        dumps = dump_law(conn, norm)
+        if not dumps:
             missing.append(norm)
             continue
-        if not law["articles"]:
-            empty.append(norm)
-            continue
-        laws.append(law)
+        for law in dumps:
+            if not law["articles"]:
+                empty.append(norm)
+                continue
+            laws.append(law)
     conn.close()
 
     if missing:
-        print(f"警告：{len(missing)} 部在库里没有生效版本，未进包：{', '.join(missing[:8])}"
+        print(f"警告：{len(missing)} 部在库里既无生效版也无待生效版，未进包：{', '.join(missing[:8])}"
               + (" …" if len(missing) > 8 else ""))
     if empty:
         print(f"警告：{len(empty)} 部切不出条文，未进包：{', '.join(empty[:8])}"
@@ -209,8 +227,11 @@ def main() -> None:
         json.dump(delta, f, ensure_ascii=False, indent=1)
 
     size_mb = os.path.getsize(args.out) / 1048576
+    pending_n = sum(1 for x in laws if (x.get("effective_date") or "") > date.today().isoformat())
     print(f"累积增量包：{args.out}")
-    print(f"  {len(laws)} 部法规 / {total_articles} 条正文 ｜ {size_mb:.1f} MB 未压缩")
+    print(f"  {len(laws)} 条版本 / {total_articles} 条正文 ｜ {size_mb:.1f} MB 未压缩")
+    if pending_n:
+        print(f"  其中 {pending_n} 条是待生效版本（带进包，用户那天翻成现行）")
     print(f"  适用：本地版本 ≥ {ledger['min_version']}（更早的会回落全量）")
     print(f"  目标：{to_version}，条文截至 {data_cutoff or '未知'}")
 

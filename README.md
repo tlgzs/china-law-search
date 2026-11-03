@@ -130,17 +130,27 @@ python3 tools/fetch_data.py --repo tlgzs/china-law-search
 
 | 分类 | 现行法规 | 说明 |
 |---|---|---|
-| 地方性法规 | 15,380 部 | 省级 / 设区的市 / 自治州 / 自治县 / 经济特区 |
-| 行政法规 | 584 部 | — |
+| 地方性法规 | 15,388 部 | 省级 / 设区的市 / 自治州 / 自治县 / 经济特区 |
+| 行政法规 | 585 部 | — |
 | 司法解释 | 362 部 | — |
-| 法律 | 304 部 | 与官方公布的法律目录数量一致 |
-| 修改决定 | 163 部 | 「关于修改《X》的决定」按修改项收录，与母法分开，避免混进母法检索结果 |
+| 法律 | 302 部 | 按库内现行有效版本计，不含已废止的历史文本 |
+| 修改决定 | 222 部 | 「关于修改《X》的决定」按修改项收录，与母法分开，避免混进母法检索结果 |
 | 法律解释 / 监察法规 / 宪法 | 12 / 2 / 1 部 | — |
 
-合计 **16,808 部法规 / 700,471 条现行条文**，另含 334,253 条历史条文
+合计 **16,874 部法规 / 700,551 条现行条文**，另含 338,408 条历史条文
 （标 `repealed` + 失效日期，默认不返回）。
 
-条文收录截至 **2026-09-16**（库内最新一部法规的公布日期）。这个日期由
+其中 **1,650 条（42 部法规）是「已公布、尚未生效」**，标 `pending`。这些条文可以查、
+可以核，但**不能当现行依据引用**——检索结果带琥珀色「尚未生效 · 某日施行」标签，
+引文核验会明确拦一句「不得作为现行有效依据引用」。状态由施行日期与当天比较自动判定，
+到了施行日会自动转成 `effective`，不需要人工改。
+
+一部法改了但新版还没施行时，新版与旧版在库里**同时存在**：旧版仍是 `effective`，
+是此刻该引的文本；新版是 `pending`，到施行日当天旧版才转 `superseded`、条文标
+`repealed`。查条文与检索都按「现行 > 已公布未生效 > 历史」取版，同一条文不会
+返回两次。
+
+条文收录截至 **2026-10-17**（库内最新一部法规的公布日期）。这个日期由
 `corpus_version` 之外的 `data_cutoff` 单独记录——版本号说明「哪天打的包」，
 截止日说明「条文收到哪一天」，两者不要混。
 
@@ -305,6 +315,24 @@ curl -X POST http://127.0.0.1:8001/api/law/verify \
 
 返回按法规类型分组的条数统计、现行有效条数、向量库状态。
 
+### `GET /api/law/update-status`
+
+查数据与程序版本。带缓存（默认 1 小时），`?force=true` 强制联网。
+返回 `data`（`local` / `remote` / `has_update` / `mode` / `size_text`）与
+`app`（`local` / `remote` / `has_update` / `url`）两组字段。
+
+```bash
+curl http://127.0.0.1:8001/api/law/update-status
+```
+
+### `POST /api/law/update-data`
+
+下载并安装数据更新，增量优先、失败回落全量。**仅允许本机调用**——
+更新会改用户本地库，网页若被反向代理到公网，不能让任何人都能触发。
+经代理转发的请求 `client.host` 是代理地址，正好被 403 挡住。
+
+同一时刻只允许一个更新在跑，并发请求返回 409。
+
 ## 自己建库
 
 `ingest/` 是一条完整流水线。解析与建库只依赖标准库，**不需要装任何包**；
@@ -368,16 +396,16 @@ python3 tools/update.py --apply reports/changes-<时间>.plan.json --approve
 ## 发版
 
 ```bash
-# 1) 把本次变更并入账本，并打出累积增量包
-python3 tools/make_delta.py --plan reports/changes-xxx.plan.json \
-    --out dist/delta-2026.11.30.1.json
+# 1) 把本次变更并入账本，并打出累积增量包（一次发版可传多份 --plan，按顺序并账）
+python3 tools/make_delta.py --plan reports/changes-2026xxxxxxxx.plan.json \
+    --out dist/delta-2026.11.03.2.json
 
 # 2) 打包全量库 + 增量包 + manifest（同时产出 .zst 与 .gz）
 python3 tools/make_release.py --db data/law_data.db \
-    --delta dist/delta-2026.11.30.1.json --out-dir dist/
+    --delta dist/delta-2026.11.03.2.json --out-dir dist/
 
 # 3) 上传为 Release（需已安装 gh 并登录）
-gh release create data-2026.11.30.1 dist/* --title "数据 2026.11.30" --notes "法规 N 部 / 法条 N 条"
+gh release create data-2026.11.03.2 dist/* --title "数据 2026.11.03.2" --notes "法规 N 部 / 法条 N 条"
 ```
 
 **增量包是累积的，不是一版配一版。** `state/change-ledger.json` 记着自首个
@@ -385,7 +413,18 @@ Release 起所有改过的法规，每次发版把账本里每部法的**最终�
 用户的库停在哪一版都只下这几 MB，不用逐版追。同一部法改过多次，包里只存最终
 一份，体积随「改过多少部法」增长，不随发版次数叠加。
 
-实测参考：315 部法规 / 7253 条正文 → 8.5 MB 未压缩、**1.4 MB gz**、841 KB zst。
+包里有两类版本，都是为了「库里能查到完整的法规」：**现行版**（`effective`）与
+**已公布待生效版**（`pending`）。待生效的也必须带——全新法在施行日前没有现行版，
+漏掉它用户就永远补不到这部法（《医疗保障法》2027-01-01 才施行）；旧版仍生效、
+新版待施行的（《商标法》），两条都要带，否则用户看不到已公布的修订。到施行日由
+`refresh_pending_status` 自动翻成现行，用户不用再下一次。
+
+实测参考（2026.11.03.2）：账本 529 部法 → 536 条版本 / 13,503 条正文，
+15.5 MB 未压缩、**2.6 MB gz**、1.4 MB zst；同期全量库 gz 672 MB / zst 512 MB。
+也就是说，装过 10 月库的用户这次只需要下 2.6 MB，而不是 672 MB。
+
+发版机磁盘紧张也不怕：`make_release.py` 用硬链接指向原库再压缩，不会真的复制
+一份 2.4 GB 出来（跨文件系统时自动退回复制，并提示预留空间）。
 
 必须先跑 `make_delta.py` 再跑 `make_release.py`：前者顺带更新账本，跳过它直接
 打包会让增量包内容与账本对不上。`make_release.py` 会核对增量包的 `to_version`
@@ -399,10 +438,12 @@ Release 起所有改过的法规，每次发版把账本里每部法的**最终�
 `gh` 不是必装的，网页上操作等价：
 
 1. 仓库右侧 **Releases** → **Create a new release**
-2. **Choose a tag** 填 `data-2026.11.30.1`，Target 选 `main`（点「Create new tag on publish」）
-3. **Release title** 填 `数据 2026.11.30.1`，正文写变更摘要
-4. 把 `dist/` 里三个文件拖进附件框：`manifest.json`、`.gz`、`.zst`。**文件名不能改**，
-   必须与 `manifest.json` 里 `artifacts[].name` 逐字一致，否则用户端挑不到资产
+2. **Choose a tag** 填 `data-2026.11.03.2`，Target 选 `main`（点「Create new tag on publish」）
+3. **Release title** 填 `数据 2026.11.03.2`，正文写变更摘要
+4. 把 `dist/` 里**五个**文件全部拖进附件框：`manifest.json`、`law_data-*.db.gz`、
+   `law_data-*.db.zst`、`delta-*.json.gz`、`delta-*.json.zst`。**文件名不能改**，
+   必须与 `manifest.json` 里 `artifacts[].name` 逐字一致，否则用户端挑不到资产。
+   漏传增量包不会报错，但所有用户都会被推去下 672 MB 全量——这轮发版就白发了
 5. **Release label** 保持 `None`
 6. 点 **Publish release**
 
@@ -417,10 +458,11 @@ Release 起所有改过的法规，每次发版把账本里每部法的**最终�
 
 ```bash
 RID=$(curl -s -H "Authorization: Bearer $TOKEN" \
-  https://api.github.com/repos/tlgzs/china-law-search/releases/tags/data-2026.11.30.1 \
+  https://api.github.com/repos/tlgzs/china-law-search/releases/tags/data-2026.11.03.2 \
   | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
 
-for f in manifest.json law_data-2026.11.30.1.db.gz law_data-2026.11.30.1.db.zst; do
+for f in manifest.json law_data-2026.11.03.2.db.gz law_data-2026.11.03.2.db.zst \
+         delta-2026.11.03.2.json.gz delta-2026.11.03.2.json.zst; do
   curl -X POST -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/octet-stream" \
     --data-binary @"dist/$f" \
@@ -432,25 +474,59 @@ done
 
 ### 用户侧升级
 
-升级和首次安装是同一条命令：
+三种入口，装的都是同一个东西，按习惯挑一个：
 
 ```bash
-python3 tools/fetch_data.py
+python3 tools/check_update.py           # 只查，不装（会同时报数据和程序版本）
+python3 tools/check_update.py --update  # 查 + 装
+./update.sh                             # 同上，自带环境探测
 ```
 
-它读 Release 的 `manifest.json`：已是最新就不动；本地版本不早于增量包的
-`min_version` 就只下增量（几 MB）；本地比 `min_version` 还旧（中间断了好几轮，
-只补这一包会漏掉更早的改动）才下全量。增量这条路任何一步不通都会**自动回落全量**，
-不会把用户卡在报错上。
+macOS 上也可以直接双击 **`更新数据.command`**，跑完窗口会停住让你看结果。
 
-增量应用约 100 秒，其中 90 多秒花在重建 100 万条的全文索引上。只有真的写入了
-新法规才重建；版本号对得上、或内容已在库里（重复应用、断点重跑）时直接返回。
+网页顶部会自动提示。服务启动时在后台查一次（不阻塞启动，断网也不影响用），
+结果缓存一小时；查到新版就在检索框上方亮一条琥珀色提示条，写明「本地 → 线上」
+和增量包体积，点「立即更新」才会装。点「×」记在浏览器本地，同一版本不再弹。
 
-手工控制升级时点可以单独用：
+```
+发现有新版本：法规库 2026.11.03.2 → 2026.11.30.1，增量 3.2 MB；
+              程序 2.3.0 → 2.4.0（git pull 后重启）
+```
+
+**数据会自己装，程序不会。** 程序更新改的是 Python 源码，只能 `git pull` 后重启服务
+——用户本地可能还有未提交的改动，自动拉取会把它们冲掉，所以这里只提示不动手。
+
+不想开网页、也不想手动跑的话，启动前设一个环境变量：
+
+```bash
+export LAW_AUTO_UPDATE=1   # 启动时查到有新版就直接装完，网页只显示结果
+```
+
+#### 判断规则
+
+数据看 Release 里 `manifest.json` 的 `corpus_version`，程序看 tag `app-v*`。
+两者分开，因为程序改个错别字不该逼着重发一个 600 MB 的数据包。
+
+| 本地 vs 线上 | 行为 |
+|---|---|
+| 本地 = 线上 | 「已是最新」 |
+| 本地 < 线上，且本地不早于增量包的 `min_version` | 下增量（几 MB） |
+| 本地 < 线上，但本地比 `min_version` 还旧 | 下全量（500–660 MB） |
+| 本地 > 线上 | 提示「本地比发布版新（开发态）」，不动 |
+
+增量那条路任何一步不通（格式不认、解压失败、校验不过）都会**自动回落全量**，
+不会把人卡在报错上。增量应用约 100 秒，其中 90 多秒花在重建 100 万条的全文索引；
+只有真的写入了新法规才重建。
+
+手工控制时点可以单独用：
 
 ```bash
 python3 tools/apply_delta.py --delta dist/delta-2026.11.30.1.json.gz
+python3 tools/fetch_data.py --from-file 手动下载的包      # 离线安装
 ```
+
+网络受限时（只放行 `api.github.com`、`github.com` 被墙）不需要额外配置：
+读取 `manifest.json` 和下载附件都会自动改走 API 资产接口重试一次。
 
 ## 目录结构
 
@@ -472,13 +548,18 @@ ingest/                        建库流水线
   ingest_to_vectordb.py        构建向量索引（可选）
 tools/
   fetch_data.py                下载 / 校验 / 安装数据包（用户侧）
+  check_update.py              查数据与程序版本（命令行与网页共用同一份判断）
   update.py                    增量更新主程序（出报告 / 确认写库）
   diff_articles.py             条文级比对 + HTML 报告
   make_delta.py                生成累积增量包（顺带更新变更账本）
   apply_delta.py               应用增量包（幂等，可重复跑）
   make_release.py              打包发版资产
+  import_flk.py                把 flk 批量下载的 docx 整理成 inbox Markdown
+  fix_pending_supersede.py     修复「待生效版本提前作废旧版」的存量数据
 state/change-ledger.json       变更账本：自首个 Release 起改过的法规清单
 docs/UPDATE-PIPELINE.md        更新流水线的设计说明
+VERSION                        程序版本（唯一来源，server 与发版脚本都读它）
+update.sh                      命令行更新；更新数据.command 双击更新
 .github/ISSUE_TEMPLATE/        issue 表单：提交新法规 / 法条纠错
 ```
 
@@ -500,6 +581,11 @@ docs/UPDATE-PIPELINE.md        更新流水线的设计说明
 | `LAW_CALL_LOG_PATH` | `$LAW_DATA_DIR/call_log.jsonl` | 调用日志 |
 | `LAW_EMBEDDING_MODEL` | `BAAI/bge-large-zh-v1.5` | 向量模型 |
 | `LAW_COLLECTION_NAME` | `chinese_laws` | 向量集合名 |
+| `LAW_REPO` | 从 git remote 推断 | 查更新用的仓库 `owner/name` |
+| `LAW_UPDATE_CHECK_TTL` | `3600` | 版本检查缓存秒数；`0` 表示每次真查 |
+| `LAW_UPDATE_CHECK_ON_START` | `1` | `0` 关闭启动时的后台检查 |
+| `LAW_AUTO_UPDATE` | `0` | `1` 时查到新版直接装，不等用户点 |
+| `GITHUB_TOKEN` | 空 | 可选，未认证 API 限额 60 次/小时，配了 5000 |
 
 老版本数据包不需要手动迁移：服务启动时会自动补齐新增字段，可反复执行。
 

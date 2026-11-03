@@ -116,6 +116,8 @@ TOOLS = [
             "article_suffix=之一，两者不会串号。\n"
             "返回的 status 为 effective 表示现行有效，repealed 表示已被修订"
             "（此时 repeal_date / replaced_by 会给出失效日期和替代法规）。\n"
+            "若 status 为 pending（is_pending=true），说明该条已公布但尚未生效，"
+            "effective_date 是施行日，此时不得作为现行有效依据引用。\n"
             "citation_hint 字段可直接复制为规范引用格式。"
         ),
         "inputSchema": {
@@ -349,6 +351,13 @@ class LawMcpServer:
             )
 
         item["citation_hint"] = f"《{item['law_name']}》{item['article_number']}"
+        if item.get("is_pending"):
+            item["warning"] = (
+                f"该条文已公布但尚未生效，{item['effective_date']} 起施行，"
+                "不得作为现行有效依据引用"
+                if item.get("effective_date") else
+                "该条文已公布但尚未生效，不得作为现行有效依据引用"
+            )
         return _ok({"article": item, "data_snapshot": self.snapshot()})
 
     def tool_get_law(self, args: dict) -> dict:
@@ -418,6 +427,7 @@ class LawMcpServer:
                     "article_suffix": it["article_suffix"],
                     "chapter": it["chapter"],
                     "status": it["status"],
+                    "is_pending": it.get("is_pending", False),
                     "excerpt": (it["content"] or "")[:120],
                 }
                 for it in items

@@ -58,6 +58,11 @@
   .tag{font-size:11px;padding:1px 7px;border-radius:999px;background:#F1EFE8;color:#5F5E5A;font-weight:400}
   .tag.law{background:#E6F1FB;color:#185FA5}
   .tag.bad{background:#FCEBEB;color:#A32D2D}
+  /* 已公布未生效：用琥珀色，和「已失效」的红必须区分开 */
+  .tag.warn{background:#FAEEDA;color:#8A5A0B}
+  .item.pending{border-left:3px solid #D79A2B}
+  .warnbar{margin-top:14px;padding:10px 12px;border-radius:6px;background:#FAEEDA;color:#8A5A0B;
+    font-size:12.5px;line-height:1.6;border-left:3px solid #D79A2B}
   .snip{color:#2C3A4B;font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .item.open .snip{-webkit-line-clamp:unset;display:block;white-space:pre-wrap}
   .meta{color:var(--muted);font-size:12px;margin-top:8px;display:none;gap:14px;flex-wrap:wrap}
@@ -82,6 +87,16 @@
   .credit a{color:inherit;text-decoration:none;border-bottom:1px dotted currentColor}
   .banner{display:none;background:#FDF3DC;border:1px solid #F0DCA8;border-radius:10px;padding:12px 14px;margin-bottom:16px}
   .banner input{width:280px}
+  /* 检查更新提示条 */
+  .updatebar{display:none;align-items:center;gap:12px;flex-wrap:wrap;background:#FAEEDA;
+       border:1px solid #E8CFA0;border-left:3px solid var(--brass);border-radius:10px;
+       padding:11px 14px;margin-bottom:16px;font-size:13px;color:#8A5A0B;line-height:1.6}
+  .updatebar .ub-body{flex:1 1 320px}
+  .updatebar b{font-weight:600}
+  .updatebar .ub-btn{background:var(--brass);padding:7px 16px;font-size:13px;flex:0 0 auto}
+  .updatebar .ub-btn[disabled]{opacity:.55;cursor:default}
+  .updatebar .ub-x{background:transparent;color:#8A5A0B;padding:2px 8px;font-size:16px;
+       line-height:1;flex:0 0 auto}
   /* 空状态引导 */
   .guide{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:26px 24px;margin-top:20px}
   .guide h2{margin:0 0 6px;font-size:15px;font-weight:600}
@@ -110,6 +125,12 @@
 </header>
 
 <main>
+  <div class="updatebar" id="updateBar">
+    <span class="ub-body" id="updateText"></span>
+    <button class="ub-btn" id="updateBtn">立即更新</button>
+    <button class="ub-x" id="updateClose" title="本次忽略">×</button>
+  </div>
+
   <div class="banner" id="authBanner">
     需要 API Token 才能查询：<input type="text" id="tokenInput" placeholder="粘贴 token 后回车">
   </div>
@@ -261,15 +282,69 @@ async function loadStatus() {
   }
 }
 
+// ---------------- 检查更新 ----------------
+// 服务启动时已在后台查过一次并缓存 1 小时，这里读到的通常是缓存，
+// 不会每次打开页面都去打 GitHub API。
+async function checkUpdate() {
+  let s;
+  try {
+    s = await fetch("/api/law/update-status").then(r => r.ok ? r.json() : null);
+  } catch (e) { return; }
+  if (!s || !s.ok) return;
+  const d = s.data || {}, a = s.app || {};
+  const parts = [];
+  if (d.has_update) {
+    parts.push("法规库 <b>" + esc(d.local || "未安装") + "</b> → <b>" + esc(d.remote) +
+      "</b>，" + (d.mode === "delta" ? "增量 " : "全量 ") + esc(d.size_text || ""));
+  }
+  if (a.has_update) {
+    parts.push("程序 <b>" + esc(a.local) + "</b> → <b>" + esc(a.remote) +
+      "</b>（git pull 后重启）");
+  }
+  if (!parts.length) return;
+
+  // 只有程序有新版本时，网页这边装不了，不给按钮，避免点了没反应
+  if (!d.has_update) $("#updateBtn").style.display = "none";
+
+  const key = (d.remote || "") + "|" + (a.remote || "");
+  if (localStorage.getItem("law_update_ignored") === key) return;
+  $("#updateText").dataset.key = key;
+  $("#updateText").innerHTML = "发现有新版本：" + parts.join("；");
+  $("#updateBar").style.display = "flex";
+}
+
+async function runUpdate() {
+  const btn = $("#updateBtn"), text = $("#updateText");
+  btn.disabled = true;
+  btn.textContent = "更新中…";
+  text.innerHTML = "正在下载并入库，这几秒检索会稍慢，请不要关闭页面。";
+  try {
+    const res = await fetch("/api/law/update-data", {method: "POST"});
+    const j = await res.json().catch(() => ({}));
+    if (res.ok && j.ok) {
+      text.innerHTML = "已更新到 <b>" + esc(j.to_version || "") + "</b>，页面即将刷新…";
+      setTimeout(() => location.reload(), 1600);
+      return;
+    }
+    text.innerHTML = "更新未完成：" + esc(j.error || ("HTTP " + res.status));
+  } catch (e) {
+    text.innerHTML = "更新未完成：" + esc(e.message || String(e));
+  }
+  btn.disabled = false;
+  btn.textContent = "重试";
+}
+
 function itemHtml(it, q, i) {
   const dead = it.is_repealed;
+  const pending = it.is_pending;
   const tags = [
     `<span class="tag">${esc(it.article_number || "")}</span>`,
     it.law_type_label ? `<span class="tag law">${esc(it.law_type_label)}</span>` : "",
-    dead ? `<span class="tag bad">已失效${it.repeal_date ? " · " + esc(it.repeal_date) : ""}</span>` : ""
+    dead ? `<span class="tag bad">已失效${it.repeal_date ? " · " + esc(it.repeal_date) : ""}</span>` : "",
+    pending ? `<span class="tag warn">尚未生效${it.effective_date ? " · " + esc(it.effective_date) + " 起施行" : ""}</span>` : ""
   ].join("");
   return `
-    <div class="item${dead ? " dead" : ""}" data-i="${i}">
+    <div class="item${dead ? " dead" : ""}${pending ? " pending" : ""}" data-i="${i}">
       <h3>${esc(it.law_name)} ${tags}</h3>
       <div class="snip">${highlight(it.content, q)}</div>
       <div class="meta">
@@ -278,6 +353,7 @@ function itemHtml(it, q, i) {
         <span>施行：${esc(it.effective_date || "—")}</span>
         ${it.score ? `<span>相关度：${it.score}</span>` : ""}
         ${dead && it.replaced_by ? `<span>已被新版本取代</span>` : ""}
+        ${pending ? `<span>该条尚未生效，不得作现行依据引用</span>` : ""}
       </div>
     </div>`;
 }
@@ -344,22 +420,25 @@ async function lookup() {
         可能是法名写法不同，或该条确实不存在——检索页搜关键词更容易命中。</div>`;
       return;
     }
-    const dead = d.status && d.status !== "effective";
+    const dead = d.status === "repealed" || d.status === "superseded";
+    const pending = d.status === "pending";
     out.innerHTML = `
       <div class="full">
         <h2>${esc(d.law_name)}
           <span class="tag">${esc(d.article_number)}</span>
           ${d.law_type_label ? `<span class="tag law">${esc(d.law_type_label)}</span>` : ""}
           ${dead ? `<span class="tag bad">已失效</span>` : ""}
+          ${pending ? `<span class="tag warn">尚未生效</span>` : ""}
         </h2>
         <div class="body">${esc(d.content)}</div>
         <div class="foot">
           <span>章节：${esc(d.chapter || "—")} ${d.section ? "· " + esc(d.section) : ""}</span>
           <span>公布：${esc(d.publish_date || "—")}</span>
           <span>施行：${esc(d.effective_date || "—")}</span>
-          <span>状态：${dead ? esc(d.status) : "现行有效"}</span>
+          <span>状态：${dead ? "已失效" : (pending ? "尚未生效" : "现行有效")}</span>
           ${d.repeal_date ? `<span>失效日期：${esc(d.repeal_date)}</span>` : ""}
         </div>
+        ${pending ? `<div class="warnbar">该条文已公布但尚未生效，${esc(d.effective_date || "")} 起施行，不得作为现行有效依据引用。</div>` : ""}
       </div>`;
   } catch (e) {
     out.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
@@ -381,6 +460,7 @@ async function verify() {
       const ok = r.verified;
       let note = "";
       if (!ok) note = r.error === "parse_failed" ? "引文格式无法解析" : (r.error || "未找到");
+      else if (r.status === "pending") note = "条文与库内一致，但尚未生效，不得作现行依据";
       else if (r.status && r.status !== "effective") note = "状态：" + esc(r.status) + (r.repeal_reason ? "（" + esc(r.repeal_reason) + "）" : "");
       else if (r.has_multiple_versions) note = "存在多个版本，请人工确认适用版本";
       else if (r.is_principle_clause) note = "原则性条款，需结合具体条文适用";
@@ -389,7 +469,7 @@ async function verify() {
         <td>${esc(r.source_citation || r.law_name || "")}</td>
         <td class="${ok ? "yes" : "no"}">${ok ? "通过" : "未通过"}</td>
         <td>${esc(r.law_name || "—")} ${esc(r.article_number || "")}</td>
-        <td>${esc(r.status === "effective" ? "现行有效" : (r.status || "—"))}</td>
+        <td>${esc(r.status === "effective" ? "现行有效" : (r.status === "pending" ? "尚未生效" : (r.status === "repealed" ? "已废止" : (r.status || "—"))))}</td>
         <td>${esc(r.effective_date || "—")}</td>
         <td>${note}</td>
       </tr>`;
@@ -427,7 +507,15 @@ $("#tokenInput").addEventListener("keydown", e => {
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#q").focus(); }
 });
+$("#updateBtn").addEventListener("click", runUpdate);
+$("#updateClose").addEventListener("click", () => {
+  $("#updateBar").style.display = "none";
+  const key = $("#updateText").dataset.key;
+  if (key) localStorage.setItem("law_update_ignored", key);
+});
+
 loadStatus();
+checkUpdate();
 </script>
 </body>
 </html>

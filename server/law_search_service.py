@@ -59,6 +59,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel
 
@@ -82,6 +83,7 @@ try:  # 以 `uvicorn server.law_search_service:app` 启动
         parse_article_suffix,
         parse_citation_string as _parse_citation_string,
         row_to_item as _row_to_item,
+        status_rank,
     )
 except ImportError:  # 以 `python server/law_search_service.py` 直接启动
     from law_query_core import (  # type: ignore[no-redef]  # noqa: PLC0415
@@ -95,7 +97,14 @@ except ImportError:  # 以 `python server/law_search_service.py` 直接启动
         parse_article_suffix,
         parse_citation_string as _parse_citation_string,
         row_to_item as _row_to_item,
+        status_rank,
     )
+
+# 检查更新：判断逻辑与 tools/check_update.py 共用同一份，这里只引入缓存层
+try:  # 以 `uvicorn server.law_search_service:app` 启动
+    from server import update_checker  # noqa: PLC0415
+except ImportError:  # 以 `python server/law_search_service.py` 直接启动
+    import update_checker  # type: ignore[no-redef]  # noqa: PLC0415
 
 # ============================================================
 # 配置（环境变量 > 默认值；默认相对本项目 data/ 目录）
@@ -103,6 +112,22 @@ except ImportError:  # 以 `python server/law_search_service.py` 直接启动
 
 _BASE_DIR = Path(__file__).resolve().parent.parent
 _DATA_DIR = Path(os.environ.get("LAW_DATA_DIR", str(_BASE_DIR / "data")))
+
+
+def _read_app_version() -> str:
+    """程序版本号的唯一来源：仓库根目录的 VERSION 文件。
+
+    以前这个数字硬编码在 FastAPI(...) 和 /health 两处，改版本要记得改两个地方，
+    而「检查程序更新」需要一个能跟 GitHub tag 比对的可信值，散落的硬编码不行。
+    读不到就返回 "0.0.0"——宁可显示成未知版本，也不让服务起不来。
+    """
+    try:
+        return (_BASE_DIR / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+APP_VERSION = _read_app_version()
 
 DB_PATH = os.environ.get("LAW_DB_PATH", str(_DATA_DIR / "law_data.db"))
 CHROMA_PATH = os.environ.get("LAW_CHROMA_PATH", str(_DATA_DIR / "legal_vector_db"))
@@ -412,7 +437,7 @@ def init_chromadb():
 # FastAPI 应用
 # ============================================================
 
-app = FastAPI(title="China Law Search API", version="2.2.0")
+app = FastAPI(title="China Law Search API", version=APP_VERSION)
 
 
 @app.get("/health")
@@ -420,19 +445,28 @@ async def health():
     """健康检查 — 返回双库状态。免认证。"""
     result: dict[str, Any] = {
         "status": "ok",
-        "version": "2.2.0",
+        "version": APP_VERSION,
         "api_enforce": API_ENFORCE,
         "clients": sorted({m["client_id"] for m in API_KEYS.values()}),
         "public_clients": PUBLIC_CLIENTS,
     }
 
-    # SQLite 状态（count=含历史版本，effective=现行有效）
+    # SQLite 状态（count=含历史版本，effective=现行有效，pending=已公布未生效）
     try:
         sqlite_count = db.execute("SELECT COUNT(*) FROM law_articles").fetchone()[0]
         effective_count = db.execute(
-            "SELECT COUNT(*) FROM law_articles WHERE status IS NULL OR status != 'repealed'"
+            "SELECT COUNT(*) FROM law_articles "
+            "WHERE status IS NULL OR status NOT IN ('repealed','pending')"
         ).fetchone()[0]
-        result["sqlite"] = {"status": "ok", "count": sqlite_count, "effective": effective_count}
+        pending_count = db.execute(
+            "SELECT COUNT(*) FROM law_articles WHERE status = 'pending'"
+        ).fetchone()[0]
+        result["sqlite"] = {
+            "status": "ok",
+            "count": sqlite_count,
+            "effective": effective_count,
+            "pending": pending_count,
+        }
 
         # 数据版本：法条有时效，使用者必须能一眼看到自己查的是哪一版
         try:
@@ -606,7 +640,7 @@ async def get_law_article(
                       source_file
                FROM law_articles
                WHERE law_name = ? AND article_number_num = ?{history_filter}{suffix_filter}
-               ORDER BY CASE WHEN status = 'repealed' THEN 1 ELSE 0 END, id DESC
+               ORDER BY {status_rank()}, id DESC
                LIMIT 1""",
             (name_to_try, article_num, *suffix_args),
         ).fetchone()
@@ -622,7 +656,7 @@ async def get_law_article(
                       source_file
                FROM law_articles
                WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?{history_filter}{suffix_filter}
-               ORDER BY CASE WHEN status = 'repealed' THEN 1 ELSE 0 END, LENGTH(law_name) ASC
+               ORDER BY {status_rank()}, LENGTH(law_name) ASC
                LIMIT 5""",
             (f"%{normalized_name}%", f"%{original_name}%", article_num, *suffix_args),
         ).fetchall()
@@ -641,6 +675,13 @@ async def get_law_article(
         logger.warning("Not found: law_name=%s, article_num=%d", normalized_name, article_num)
         return {"error": "not_found", "law_name": law_name, "article_num": article_num}
 
+    # 这个接口不经过 law_query_core.row_to_item，自己拼返回值，
+    # 所以 pending 归一与 is_pending 必须在这里单独补一次 —— 漏了就会出现
+    # 「引文核验提示尚未生效、单条查询却显示现行有效」的自相矛盾。
+    _status = row["status"] or "effective"
+    _eff = row["effective_date"] or ""
+    if _status == "pending" and _eff and _eff <= datetime.date.today().isoformat():
+        _status = "effective"
     result = {
         "law_name": row["law_name"],
         "law_type": row["law_type"],
@@ -653,8 +694,10 @@ async def get_law_article(
         "article": row["article"],
         "content": row["content"],
         "publish_date": row["publish_date"] or "",
-        "effective_date": row["effective_date"] or "",
-        "status": row["status"] or "effective",
+        "effective_date": _eff,
+        "status": _status,
+        "is_pending": _status == "pending",
+        "is_repealed": _status == "repealed",
         "repeal_date": row["repeal_date"] or "",
         "repeal_reason": row["repeal_reason"] or "",
         "replaced_by": row["replaced_by"] or "",
@@ -781,11 +824,18 @@ async def law_stats(client_id: str = Depends(verify_token)):
         elapsed_ms=elapsed_ms,
     )
     effective = db.execute(
-        "SELECT COUNT(*) FROM law_articles WHERE status IS NULL OR status != 'repealed'"
+        "SELECT COUNT(*) FROM law_articles "
+        "WHERE status IS NULL OR status NOT IN ('repealed','pending')"
+    ).fetchone()[0]
+    pending = db.execute(
+        "SELECT COUNT(*) FROM law_articles WHERE status = 'pending'"
     ).fetchone()[0]
     return {
         "total_articles": total,
         "effective_articles": effective,
+        # 已公布未生效的条文单列。算进 effective 会让「现行有效」这个数虚高，
+        # 而这个数会被写进文档和对外文案。
+        "pending_articles": pending,
         "by_type": by_type,
         "chromadb_status": chromadb_status,
         "chromadb_count": chromadb_count,
@@ -795,13 +845,45 @@ async def law_stats(client_id: str = Depends(verify_token)):
 
 
 # ============================================================
+# API: 检查数据 / 程序更新
+# ============================================================
+# 这两个接口只允许本机调用：更新会改用户本地的法条库，网页若被反向代理到公网，
+# 不能让任何人都能触发。经代理转发的请求 client.host 是代理地址，正好被挡住。
+
+def _require_local(request: Request) -> None:
+    host = request.client.host if request.client else None
+    if not update_checker.is_local_host(host):
+        raise HTTPException(status_code=403,
+                            detail="更新接口只允许在本机调用")
+
+
+@app.get("/api/law/update-status")
+async def update_status(request: Request, force: bool = Query(default=False)):
+    """数据与程序版本对比。默认读缓存（TTL 1 小时），force=true 强制联网。"""
+    _require_local(request)
+    return update_checker.get_status(force=force)
+
+
+@app.post("/api/law/update-data")
+async def update_data(request: Request):
+    """下载并安装数据更新（增量优先，失败回落全量）。"""
+    _require_local(request)
+    result = update_checker.run_update()
+    if result.get("ok"):
+        return {"ok": True, "to_version": result.get("to_version"),
+                "last": update_checker.last_update()}
+    return JSONResponse(status_code=409 if result.get("busy") else 500,
+                        content=result)
+
+
+# ============================================================
 # 启动事件
 # ============================================================
 
 @app.on_event("startup")
 async def startup_event():
-    """服务启动时初始化 ChromaDB（如果可用）。"""
-    logger.info("Law Search Service v2.1 starting...")
+    """服务启动时初始化 ChromaDB（如果可用），并在后台查一次更新。"""
+    logger.info("Law Search Service v%s starting...", APP_VERSION)
     logger.info("SQLite: %s", DB_PATH)
     logger.info("ChromaDB: %s", CHROMA_PATH)
     logger.info("API keys: %d loaded, enforce=%s", len(API_KEYS), API_ENFORCE)
@@ -814,6 +896,10 @@ async def startup_event():
         logger.info("Vector search enabled (ChromaDB)")
     else:
         logger.info("Vector search disabled, using SQLite FTS fallback")
+
+    # 后台查一次有没有新版：不阻塞启动，断网也不影响服务
+    if os.environ.get("LAW_UPDATE_CHECK_ON_START", "1") not in ("0", "", "false", "no"):
+        update_checker.warm_cache_async(DB_PATH)
 
 
 # ============================================================
