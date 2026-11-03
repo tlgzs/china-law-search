@@ -12,21 +12,28 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d .venv ]; then
+# 虚拟环境目录两种命名都认，与 update.sh 保持一致：优先 .venv（脚本自己建的那个），
+# 其次手建的 venv。不这样的话，手工建过 venv 的机器会再建一个 .venv 白装一遍依赖。
+VENV=""
+for c in .venv venv; do
+  if [ -x "$c/bin/python" ]; then VENV="$c"; break; fi
+done
+if [ -z "$VENV" ]; then
+  VENV=.venv
   echo "首次运行，正在创建运行环境（约 1 分钟）…"
-  python3 -m venv .venv || { echo "创建虚拟环境失败"; read -r -p "按回车键关闭…" _; exit 1; }
+  python3 -m venv "$VENV" || { echo "创建虚拟环境失败"; read -r -p "按回车键关闭…" _; exit 1; }
 fi
 
-if ! .venv/bin/python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+if ! "$VENV/bin/python" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
   echo "正在安装依赖…"
-  .venv/bin/pip install -q --upgrade pip
-  .venv/bin/pip install -q fastapi "uvicorn[standard]" || { echo "依赖安装失败，请检查网络"; read -r -p "按回车键关闭…" _; exit 1; }
+  "$VENV/bin/pip" install -q --upgrade pip
+  "$VENV/bin/pip" install -q fastapi "uvicorn[standard]" || { echo "依赖安装失败，请检查网络"; read -r -p "按回车键关闭…" _; exit 1; }
 fi
 
 if [ ! -f data/law_data.db ]; then
   echo ""
   echo "提示：未找到数据文件 data/law_data.db"
-  echo "     运行下面这行自动下载（约 690 MB，装过 zstd 则是 500 MB，含校验）："
+  echo "     运行下面这行自动下载（约 676 MB，装过 zstd 则是 514 MB，含校验）："
   echo "       python3 tools/fetch_data.py"
   echo "     服务仍会启动，但没有数据可查。"
   echo ""
@@ -46,4 +53,4 @@ echo "服务地址：http://127.0.0.1:$PORT"
 export LAW_HOST=127.0.0.1
 export LAW_PORT=$PORT
 export LAW_API_ENFORCE=${LAW_API_ENFORCE:-0}
-exec .venv/bin/python -m uvicorn server.law_search_service:app --host 127.0.0.1 --port $PORT
+exec "$VENV/bin/python" -m uvicorn server.law_search_service:app --host 127.0.0.1 --port $PORT

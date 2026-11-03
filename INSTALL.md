@@ -25,7 +25,8 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 >    装之前告诉我你打算装到哪个路径。
 > 3. **克隆仓库**：`git clone https://github.com/tlgzs/china-law-search.git`
 > 4. **下载数据**：`cd china-law-search && python3 tools/fetch_data.py`
->    这一步会从 GitHub Release 下载约 690 MB 的数据库，会校验 sha256 后再就位。
+>    这一步会从 GitHub Release 下载约 676 MB 的数据库，会校验 sha256 后再就位。
+>    装过 zstd 的话自动改下 514 MB 的 .zst 版本，内容一样。
 >    如果它报「找不到仓库」，改用
 >    `python3 tools/fetch_data.py --repo tlgzs/china-law-search` 重试。
 > 5. **接入 AI 客户端**：`python3 mcp/install.py --all --yes`
@@ -59,7 +60,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 |---|---|---|---|
 | 1 | 检查 `python3` / `git` | 版本号 | 几秒 |
 | 3 | 克隆仓库 | 50 个文件，约 810 KB | 10 秒内 |
-| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 690 MB |
+| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 676 MB |
 | 5 | 写 MCP 配置 | 列出探测到的客户端，逐个 `已写入` | 几秒 |
 | 6 | 自检 | 5 行 `OK` + `全部通过` | 约 2 秒 |
 | 7 | 查一个法条 | 条文原文 + 数据版本号 | 1 秒 |
@@ -173,7 +174,7 @@ macOS 上也可以直接双击 **`更新数据.command`**，不用敲命令。
 检索框上方亮一条琥珀色提示，点「立即更新」才装，点「×」本次不再打扰。
 
 - 已经是最新：什么都不做，直接退出。
-- 有更新：**只下载变更的那几 MB**，不用重下 690 MB 全量。本地停在哪一版都行，
+- 有更新：**只下载变更的那几 MB**，不用重下 676 MB 全量。本地停在哪一版都行，
   不用逐版追。
 - 应用约 100 秒，大部分时间在重建全文索引，这期间别关窗口。
 - 万一增量这条路不通，脚本会自己改下全量，不会把你停在报错上。
@@ -280,4 +281,4 @@ python3 mcp/install.py --remove      # 从各客户端配置里删掉 yilv-law �
 **壹律从简** · [www.yilvai.com](https://www.yilvai.com) · 作者：网络小菜鸟 · 微信：`pmfumin`
 
 按上面排查表还是卡住，把**原样报错**发我（微信或 [Issues](https://github.com/tlgzs/china-law-search/issues)），
-别自己删库重来——数据包 690 MB，重下不值得。
+别自己删库重来——数据包 676 MB，重下不值得。

@@ -12,22 +12,26 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist .venv (
+rem 虚拟环境目录两种命名都认，与 update.sh 保持一致：优先 .venv（脚本自己建的那个），
+rem 其次手建的 venv。不这样的话，手工建过 venv 的机器会再建一个 .venv 白装一遍依赖。
+set "VENV=.venv"
+if not exist ".venv\Scripts\python.exe" if exist "venv\Scripts\python.exe" set "VENV=venv"
+if not exist "%VENV%\Scripts\python.exe" (
   echo 首次运行，正在创建运行环境…
-  python -m venv .venv
+  python -m venv "%VENV%"
 )
 
-.venv\Scripts\python -c "import fastapi, uvicorn" >nul 2>nul
+"%VENV%\Scripts\python" -c "import fastapi, uvicorn" >nul 2>nul
 if errorlevel 1 (
   echo 正在安装依赖…
-  .venv\Scripts\python -m pip install -q --upgrade pip
-  .venv\Scripts\python -m pip install -q fastapi "uvicorn[standard]"
+  "%VENV%\Scripts\python" -m pip install -q --upgrade pip
+  "%VENV%\Scripts\python" -m pip install -q fastapi "uvicorn[standard]"
 )
 
 if not exist data\law_data.db (
   echo.
   echo 提示：未找到数据文件 data\law_data.db
-  echo       运行下面这行自动下载（约 690 MB，含校验）：
+  echo       运行下面这行自动下载（约 676 MB，装过 zstd 则是 514 MB，含校验）：
   echo         python tools\fetch_data.py
   echo       服务仍会启动，但没有数据可查。
   echo.
@@ -53,5 +57,5 @@ echo.
 
 rem 延迟 3 秒再开浏览器，等服务起来
 start /min powershell -NoProfile -Command "Start-Sleep 3; Start-Process 'http://127.0.0.1:%LAW_PORT%'"
-.venv\Scripts\python -m uvicorn server.law_search_service:app --host 127.0.0.1 --port %LAW_PORT%
+"%VENV%\Scripts\python" -m uvicorn server.law_search_service:app --host 127.0.0.1 --port %LAW_PORT%
 pause

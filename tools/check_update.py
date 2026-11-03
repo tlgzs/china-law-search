@@ -258,9 +258,16 @@ def render(status: dict) -> str:
         lines.append(f"  本地 {d['local']}  →  线上 {d['remote']}   "
                      f"可{how}更新，约 {d.get('size_text', '?')}")
         if d.get("law_count"):
-            what = "本次变更" if d.get("scope") == "delta" else "全库"
-            lines.append(f"       {what} {d['law_count']} 部法规 / "
-                         f"{d.get('article_count') or '?'} 条正文")
+            if d.get("scope") == "delta":
+                lines.append(f"       本次变更 {d['law_count']} 部法规 / "
+                             f"{d.get('article_count') or '?'} 条正文")
+            else:
+                # manifest 顶层的 law_count 只数「有现行版本」的法规（16874），
+                # 另有几十部是已公布、尚未施行的新法：条文已经入库、也算进
+                # article_count，但没有现行版本。写成「全库 N 部法规」会和条数
+                # 自相矛盾，所以把两个数分开表述。
+                lines.append(f"       全库 {d.get('article_count') or '?'} 条正文 / "
+                             f"{d['law_count']} 部法规有现行版本")
         if d.get("why_full"):
             lines.append(f"       为何不走增量：{d['why_full']}")
         lines.append("       运行 python3 tools/check_update.py --update 安装")
