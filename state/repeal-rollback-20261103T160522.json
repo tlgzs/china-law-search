@@ -1,0 +1,270 @@
+{
+ "generated_at": "2026-11-03T16:05:22",
+ "note": "按 versions[].before_status 把版本改回去，条文按其 version_id 批量恢复为 effective",
+ "versions": [
+  {
+   "version_id": 6893,
+   "norm_name": "山东黄河三角洲国家级自然保护区条例",
+   "before_status": "effective",
+   "decision": "东营市人民代表大会常务委员会关于废止山东黄河三角洲国家级自然保护区条例的决定"
+  },
+  {
+   "version_id": 599,
+   "norm_name": "中卫市农作物秸秆处置条例",
+   "before_status": "effective",
+   "decision": "中卫市人民代表大会常务委员会关于废止中卫市农作物秸秆处置条例的决定"
+  },
+  {
+   "version_id": 851,
+   "norm_name": "乌鲁木齐市旅游景区管理条例",
+   "before_status": "effective",
+   "decision": "乌鲁木齐市人民代表大会常务委员会关于废止乌鲁木齐市旅游景区管理条例等五部地方性法规的决定"
+  },
+  {
+   "version_id": 1247,
+   "norm_name": "云南省曲靖独木水库保护条例",
+   "before_status": "effective",
+   "decision": "云南省人民代表大会常务委员会关于废止和修改云南省曲靖独木水库保护条例等7件地方性法规的决定"
+  },
+  {
+   "version_id": 1575,
+   "norm_name": "伊春市城市综合管理条例",
+   "before_status": "effective",
+   "decision": "伊春市人民代表大会常务委员会关于废止伊春市城市综合管理条例的决定"
+  },
+  {
+   "version_id": 1974,
+   "norm_name": "内蒙古自治区地质环境保护条例",
+   "before_status": "effective",
+   "decision": "内蒙古自治区人民代表大会常务委员会关于废止内蒙古自治区地质环境保护条例等5件地方性法规的决定"
+  },
+  {
+   "version_id": 23607,
+   "norm_name": "北京市食品安全条例",
+   "before_status": "effective",
+   "decision": "北京市人民代表大会常务委员会关于废止北京市食品安全条例的决定"
+  },
+  {
+   "version_id": 3933,
+   "norm_name": "呼和浩特市封山育林管理办法",
+   "before_status": "effective",
+   "decision": "呼和浩特市人民代表大会常务委员会关于废止呼和浩特市封山育林管理办法的决定"
+  },
+  {
+   "version_id": 3936,
+   "norm_name": "呼和浩特市市容环境卫生管理条例",
+   "before_status": "effective",
+   "decision": "呼和浩特市人民代表大会常务委员会关于废止呼和浩特市市容环境卫生管理条例的决定"
+  },
+  {
+   "version_id": 4750,
+   "norm_name": "大同市酒类商品监督管理条例",
+   "before_status": "effective",
+   "decision": "大同市人民代表大会常务委员会关于废止大同市酒类商品监督管理条例的决定"
+  },
+  {
+   "version_id": 4764,
+   "norm_name": "大庆市机动车和非道路移动机械排气污染防治条例",
+   "before_status": "effective",
+   "decision": "大庆市人民代表大会常务委员会关于废止大庆市机动车和非道路移动机械排气污染防治条例的决定"
+  },
+  {
+   "version_id": 4871,
+   "norm_name": "大连市职业教育条例",
+   "before_status": "effective",
+   "decision": "大连市人民代表大会常务委员会关于废止大连市职业教育条例的决定"
+  },
+  {
+   "version_id": 5167,
+   "norm_name": "天津市清洁生产促进条例",
+   "before_status": "effective",
+   "decision": "天津市人民代表大会常务委员会关于废止天津市清洁生产促进条例等三部地方性法规的决定"
+  },
+  {
+   "version_id": 5441,
+   "norm_name": "孟村回族自治县发展牛羊业条例",
+   "before_status": "effective",
+   "decision": "孟村回族自治县人民代表大会关于废止孟村回族自治县发展牛羊业条例等两部单行条例的决定"
+  },
+  {
+   "version_id": 6361,
+   "norm_name": "定西市河道生态环境保护条例",
+   "before_status": "effective",
+   "decision": "定西市人民代表大会常务委员会关于废止定西市河道生态环境保护条例的决定"
+  },
+  {
+   "version_id": 6431,
+   "norm_name": "宽城满族自治县城镇规划建设管理条例",
+   "before_status": "effective",
+   "decision": "宽城满族自治县人民代表大会关于废止宽城满族自治县城镇规划建设管理条例的决定"
+  },
+  {
+   "version_id": 7190,
+   "norm_name": "山西省重点工业污染监督条例",
+   "before_status": "effective",
+   "decision": "山西省人民代表大会常务委员会关于废止山西省重点工业污染监督条例的决定"
+  },
+  {
+   "version_id": 7312,
+   "norm_name": "巴音郭楞蒙古自治州大气污染防治办法",
+   "before_status": "effective",
+   "decision": "巴音郭楞蒙古自治州人民代表大会常务委员会关于废止巴音郭楞蒙古自治州大气污染防治办法的决定"
+  },
+  {
+   "version_id": 8380,
+   "norm_name": "延安市国家地质公园保护条例",
+   "before_status": "effective",
+   "decision": "延安市人民代表大会常务委员会关于废止延安市国家地质公园保护条例的决定"
+  },
+  {
+   "version_id": 8552,
+   "norm_name": "徐州市大气污染防治条例",
+   "before_status": "effective",
+   "decision": "徐州市人民代表大会常务委员会关于废止徐州市大气污染防治条例等两件地方性法规的决定"
+  },
+  {
+   "version_id": 23701,
+   "norm_name": "抚顺市禁止车辆运输泄漏遗撒条例",
+   "before_status": "effective",
+   "decision": "抚顺市人民代表大会常务委员会关于废止抚顺市禁止车辆运输泄漏遗撒条例的决定"
+  },
+  {
+   "version_id": 9376,
+   "norm_name": "新疆维吾尔自治区自然保护区管理条例",
+   "before_status": "effective",
+   "decision": "新疆维吾尔自治区人民代表大会常务委员会关于废止新疆维吾尔自治区自然保护区管理条例等二部地方性法规的决定"
+  },
+  {
+   "version_id": 9566,
+   "norm_name": "昆明市九乡风景名胜区保护条例",
+   "before_status": "effective",
+   "decision": "昆明市人民代表大会常务委员会关于废止和修改昆明市九乡风景名胜区保护条例等13件地方性法规的决定"
+  },
+  {
+   "version_id": 9652,
+   "norm_name": "昆明市计量监督管理条例",
+   "before_status": "effective",
+   "decision": "昆明市人民代表大会常务委员会关于废止昆明市计量监督管理条例的决定"
+  },
+  {
+   "version_id": 9672,
+   "norm_name": "昌吉回族自治州准东经济技术开发区生态环境保护条例",
+   "before_status": "effective",
+   "decision": "昌吉回族自治州人民代表大会常务委员会关于废止昌吉回族自治州准东经济技术开发区生态环境保护条例的决定"
+  },
+  {
+   "version_id": 23869,
+   "norm_name": "黑龙江省杜尔伯特蒙古族自治县城镇市容和环境卫生管理条例",
+   "before_status": "effective",
+   "decision": "杜尔伯特蒙古族自治县人民代表大会关于废止黑龙江省杜尔伯特蒙古族自治县城镇市容和环境卫生管理条例的决定"
+  },
+  {
+   "version_id": 12034,
+   "norm_name": "河北省辐射污染防治条例",
+   "before_status": "effective",
+   "decision": "河北省人民代表大会常务委员会关于废止河北省辐射污染防治条例等四部法规的决定"
+  },
+  {
+   "version_id": 12332,
+   "norm_name": "河南省辐射污染防治条例",
+   "before_status": "effective",
+   "decision": "河南省人民代表大会常务委员会关于废止河南省辐射污染防治条例等四部地方性法规的决定"
+  },
+  {
+   "version_id": 13036,
+   "norm_name": "浙江省陆生野生动物保护条例",
+   "before_status": "effective",
+   "decision": "浙江省人民代表大会常务委员会关于废止浙江省陆生野生动物保护条例等四件地方性法规的决定"
+  },
+  {
+   "version_id": 13288,
+   "norm_name": "海南省环境保护条例",
+   "before_status": "effective",
+   "decision": "海南省人民代表大会常务委员会关于废止海南省环境保护条例的决定"
+  },
+  {
+   "version_id": 15406,
+   "norm_name": "珠海市排水条例",
+   "before_status": "effective",
+   "decision": "珠海市人民代表大会常务委员会关于废止珠海市排水条例的决定"
+  },
+  {
+   "version_id": 15812,
+   "norm_name": "甘肃省环境保护条例",
+   "before_status": "effective",
+   "decision": "甘肃省人民代表大会常务委员会关于废止甘肃省环境保护条例等八部地方性法规的决定"
+  },
+  {
+   "version_id": 15985,
+   "norm_name": "白银市封山禁牧管理办法",
+   "before_status": "effective",
+   "decision": "白银市人民代表大会常务委员会关于废止白银市封山禁牧管理办法的决定"
+  },
+  {
+   "version_id": 16154,
+   "norm_name": "石家庄市物业管理条例",
+   "before_status": "effective",
+   "decision": "石家庄市人民代表大会常务委员会关于废止石家庄市物业管理条例的决定"
+  },
+  {
+   "version_id": 16681,
+   "norm_name": "聊城市城镇容貌和环境卫生管理条例",
+   "before_status": "effective",
+   "decision": "聊城市人民代表大会常务委员会关于废止聊城市城镇容貌和环境卫生管理条例的决定"
+  },
+  {
+   "version_id": 17060,
+   "norm_name": "葫芦岛市城市供水用水条例",
+   "before_status": "effective",
+   "decision": "葫芦岛市人民代表大会常务委员会关于废止葫芦岛市城市供水用水条例的决定"
+  },
+  {
+   "version_id": 18120,
+   "norm_name": "贵阳市住宅小区人口和计划生育管理服务规定",
+   "before_status": "effective",
+   "decision": "贵阳市人民代表大会常务委员会关于废止贵阳市住宅小区人口和计划生育管理服务规定的决定"
+  },
+  {
+   "version_id": 18369,
+   "norm_name": "辽宁省农业环境保护条例",
+   "before_status": "effective",
+   "decision": "辽宁省人民代表大会常务委员会关于废止辽宁省农业环境保护条例等六件地方性法规的决定"
+  },
+  {
+   "version_id": 18394,
+   "norm_name": "辽宁省商品质量监督条例",
+   "before_status": "effective",
+   "decision": "辽宁省人民代表大会常务委员会关于废止辽宁省商品质量监督条例等3件地方性法规的决定"
+  },
+  {
+   "version_id": 18942,
+   "norm_name": "邯郸市客运出租汽车管理条例",
+   "before_status": "effective",
+   "decision": "邯郸市人民代表大会常务委员会关于废止邯郸市客运出租汽车管理条例的决定"
+  },
+  {
+   "version_id": 19843,
+   "norm_name": "镇江市饮用水源地保护条例",
+   "before_status": "effective",
+   "decision": "镇江市人民代表大会常务委员会关于废止镇江市饮用水源地保护条例的决定"
+  },
+  {
+   "version_id": 21455,
+   "norm_name": "黑龙江省体育发展条例",
+   "before_status": "effective",
+   "decision": "黑龙江省人民代表大会常务委员会关于修改和废止黑龙江省体育发展条例等15部地方性法规的决定"
+  },
+  {
+   "version_id": 21893,
+   "norm_name": "齐齐哈尔市河道管理条例",
+   "before_status": "effective",
+   "decision": "齐齐哈尔市人民代表大会常务委员会关于废止齐齐哈尔市河道管理条例的决定"
+  },
+  {
+   "version_id": 21894,
+   "norm_name": "齐齐哈尔市环境噪声污染防治条例",
+   "before_status": "effective",
+   "decision": "齐齐哈尔市人民代表大会常务委员会关于废止齐齐哈尔市环境噪声污染防治条例等三部地方性法规的决定"
+  }
+ ]
+}

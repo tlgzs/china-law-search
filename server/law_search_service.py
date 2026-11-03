@@ -82,6 +82,7 @@ try:  # 以 `uvicorn server.law_search_service:app` 启动
         parse_article_number,
         parse_article_suffix,
         parse_citation_string as _parse_citation_string,
+        resolve_law_names,
         row_to_item as _row_to_item,
         status_rank,
     )
@@ -96,6 +97,7 @@ except ImportError:  # 以 `python server/law_search_service.py` 直接启动
         parse_article_number,
         parse_article_suffix,
         parse_citation_string as _parse_citation_string,
+        resolve_law_names,
         row_to_item as _row_to_item,
         status_rank,
     )
@@ -630,9 +632,14 @@ async def get_law_article(
     logger.info("Looking up: law_name=%s (normalized=%s), article_num=%d",
                 law_name, normalized_name, article_num)
 
-    # 精确匹配
+    # 精确匹配。候选名除了用户原样和归一化名，还要加上从 law_versions 反查到的
+    # 正式全称：条文的 law_name 带书名号，用户输入一般不带，直接比对必然落空。
     row = None
-    for name_to_try in [original_name, normalized_name]:
+    name_candidates = [original_name, normalized_name]
+    for canonical in resolve_law_names(db, law_name):
+        if canonical not in name_candidates:
+            name_candidates.append(canonical)
+    for name_to_try in name_candidates:
         row = db.execute(
             f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
                       article_suffix, chapter, section, article, content, publish_date, effective_date,
@@ -646,6 +653,33 @@ async def get_law_article(
         ).fetchone()
         if row:
             break
+
+    # 正文全都标了 repealed 的，是整部法规被废止了。必须在模糊匹配之前拦下来：
+    # 否则 LIKE 会滑到「关于废止《X》的决定」那一条上去 —— 决定的名字里含 X，
+    # 于是查 X 返回的是决定正文，状态还显示现行有效，比查不到更糟。
+    if not row:
+        for name_to_try in name_candidates:
+            hit = db.execute(
+                """SELECT law_name, repeal_date, repeal_reason FROM law_articles
+                   WHERE law_name = ? AND article_number_num = ?
+                     AND status = 'repealed'
+                   ORDER BY id DESC LIMIT 1""",
+                (name_to_try, article_num),
+            ).fetchone()
+            if hit:
+                elapsed_ms = int((time.time() - start) * 1000)
+                log_call(client_id=client_id, endpoint="/api/law/article",
+                         query=f"{law_name}#{article_num}", result_count=0,
+                         elapsed_ms=elapsed_ms)
+                return {
+                    "error": "law_repealed",
+                    "law_name": hit["law_name"],
+                    "article_num": article_num,
+                    "repeal_date": hit["repeal_date"],
+                    "repeal_reason": hit["repeal_reason"],
+                    "message": "该法规已废止，条文不作为现行有效依据。"
+                               "确需查看原文可加 include_history=true。",
+                }
 
     # 模糊匹配
     if not row:

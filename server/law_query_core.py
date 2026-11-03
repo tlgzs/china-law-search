@@ -136,6 +136,43 @@ def normalize_law_name(name: str) -> str:
     return (name or "").strip().replace("《", "").replace("》", "")
 
 
+def resolve_law_names(conn, name: str, limit: int = 3) -> list:
+    """把用户写的法规名换成库里条文的正式全称。
+
+    条文的 `law_name` 保留原文的书名号（「…关于废止《海南省环境保护条例》的决定」），
+    而 `law_versions.norm_name` 是去掉书名号的归一化名。用户输入一般不带书名号，
+    于是 `law_name = ?` 对不上；`LIKE '%…%'` 也救不回来 —— 书名号把子串切断了，
+    「废止海南省环境保护条例的决定」在库里并不是一段连续文本。
+
+    所以先在 law_versions（一万多行）里反查全称，再拿全称回条文表精确取。
+    先按 norm_name 精确匹配，再退到忽略书名号的比较。
+    """
+    target = normalize_law_name(name)
+    if not target:
+        return []
+
+    rows = conn.execute(
+        "SELECT DISTINCT law_name FROM law_versions WHERE norm_name = ? "
+        "ORDER BY COALESCE(publish_date, '') DESC LIMIT ?",
+        (target, limit),
+    ).fetchall()
+
+    if not rows:
+        rows = conn.execute(
+            "SELECT DISTINCT law_name FROM law_versions "
+            "WHERE REPLACE(REPLACE(norm_name, '《', ''), '》', '') = ? "
+            "ORDER BY COALESCE(publish_date, '') DESC LIMIT ?",
+            (target, limit),
+        ).fetchall()
+
+    out = []
+    for r in rows:
+        v = r["law_name"] if hasattr(r, "keys") else r[0]
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 def parse_citation_string(citation: str) -> dict:
     """解析字符串形式的法条引用。
 
@@ -314,6 +351,26 @@ def _build_verify_result(
 ) -> dict:
     """构建校验结果，确保所有字段都返回。"""
     pending = status == "pending"
+
+    if pending:
+        warning = (f"该条文已公布但尚未生效，{effective_date} 起施行，"
+                   "不得作为现行有效依据引用") if effective_date else \
+                  "该条文已公布但尚未生效，不得作为现行有效依据引用"
+    elif status == "repealed":
+        # 法规被废止与条文被修订是两回事：前者整部法不能再引，
+        # 这里要说清依据和日期，否则律师只看到「未找到」会以为是库没收。
+        basis = repeal_reason or ""
+        if basis.startswith("被") and basis.endswith("废止"):
+            basis = basis[1:-2]          # 剥掉「被…废止」的外壳，避免「废止（…废止）」
+        if basis:
+            warning = (f"该法规已于 {repeal_date} 废止，依据：{basis}，不得作为现行依据引用"
+                       if repeal_date else
+                       f"该法规已废止，依据：{basis}，不得作为现行依据引用")
+        else:
+            warning = "该法规已废止，不得作为现行依据引用"
+    else:
+        warning = None
+
     return {
         "law_name": law_name,
         "article_number": article_number,
@@ -325,11 +382,7 @@ def _build_verify_result(
         # 已公布未生效：引文本身与库内文本一致（verified 仍为 True），
         # 但绝不能当现行依据引用。给 agent 和前端一个明确的字段，别让它自己猜。
         "is_pending": pending,
-        "warning": (
-            f"该条文已公布但尚未生效，{effective_date} 起施行，不得作为现行有效依据引用"
-            if pending and effective_date else
-            ("该条文已公布但尚未生效，不得作为现行有效依据引用" if pending else None)
-        ),
+        "warning": warning,
         "effective_date": effective_date,
         "repeal_date": repeal_date,
         "repeal_reason": repeal_reason,
@@ -811,18 +864,66 @@ class LawStore:
 
             normalized = normalize_law_name(law_name)
             suffix_filter, suffix_args = self._suffix_clause(article_suffix)
-            rows = self.conn.execute(
-                f"""SELECT law_name, article_number, article_number_num, article_suffix,
-                          version_id, content, publish_date, effective_date, status,
-                          repeal_date, repeal_reason, replaced_by, is_principle_clause
-                   FROM law_articles
-                   WHERE (law_name LIKE ? OR law_name LIKE ?)
-                     AND article_number_num = ?{history_filter}{suffix_filter}
-                   ORDER BY CASE WHEN law_name = ? OR law_name = ? THEN 0 ELSE 1 END,
-                            {status_rank()}, LENGTH(law_name) ASC""",
-                (f"%{normalized}%", f"%{law_name}%", article_num, *suffix_args,
-                 normalized, law_name),
-            ).fetchall()
+            # 顺序很重要：先精确同名，再判「已废止」，最后才模糊。
+            # 模糊之所以不能打头，是因为「关于废止《X》的决定」的名字里含 X，
+            # 查 X 会被 LIKE 拽到那条决定上，核验结论变成「该条文现行有效」。
+            candidates = [law_name, normalized]
+            for canonical in resolve_law_names(self.conn, law_name):
+                if canonical not in candidates:
+                    candidates.append(canonical)
+
+            rows = []
+            for name_hint in candidates:
+                rows = self.conn.execute(
+                    f"""SELECT law_name, article_number, article_number_num, article_suffix,
+                              version_id, content, publish_date, effective_date, status,
+                              repeal_date, repeal_reason, replaced_by, is_principle_clause
+                       FROM law_articles
+                       WHERE law_name = ?
+                         AND article_number_num = ?{history_filter}{suffix_filter}
+                       ORDER BY {status_rank()}, id DESC""",
+                    (name_hint, article_num, *suffix_args),
+                ).fetchall()
+                if rows:
+                    break
+
+            if not rows:
+                # 同名法规在库里、条文却全部标了 repealed：整部法规被废止了。
+                # 这时候不能退到 LIKE 去找「名字相近的别的法规」。
+                hint = None
+                for name_hint in candidates:
+                    hint = self.conn.execute(
+                        f"""SELECT law_name, repeal_date, repeal_reason FROM law_articles
+                            WHERE status = 'repealed' AND law_name = ?
+                              AND article_number_num = ?{suffix_filter}
+                            ORDER BY id DESC LIMIT 1""",
+                        (name_hint, article_num, *suffix_args),
+                    ).fetchone()
+                    if hint:
+                        break
+
+                if hint:
+                    results.append(_build_verify_result(
+                        law_name=hint["law_name"], article_number=article_number_str,
+                        verified=False, status="repealed",
+                        repeal_date=hint["repeal_date"],
+                        repeal_reason=hint["repeal_reason"],
+                        error="该法规已废止",
+                        source_citation=source_text,
+                    ))
+                    continue
+
+                # 精确名都不存在，才放宽成包含匹配（处理「民法典」这类简称）
+                rows = self.conn.execute(
+                    f"""SELECT law_name, article_number, article_number_num, article_suffix,
+                              version_id, content, publish_date, effective_date, status,
+                              repeal_date, repeal_reason, replaced_by, is_principle_clause
+                       FROM law_articles
+                       WHERE (law_name LIKE ? OR law_name LIKE ?)
+                         AND article_number_num = ?{history_filter}{suffix_filter}
+                       ORDER BY {status_rank()}, LENGTH(law_name) ASC""",
+                    (f"%{normalized}%", f"%{law_name}%", article_num, *suffix_args),
+                ).fetchall()
 
             if not rows:
                 results.append(_build_verify_result(
