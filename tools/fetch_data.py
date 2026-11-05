@@ -92,11 +92,14 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def _request(url: str) -> urllib.request.Request:
-    return urllib.request.Request(url, headers={
+def _request(url: str, start: int = 0) -> urllib.request.Request:
+    headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
-    })
+    }
+    if start:
+        headers["Range"] = f"bytes={start}-"
+    return urllib.request.Request(url, headers=headers)
 
 
 def guess_repo() -> str:
@@ -162,70 +165,199 @@ def decompress(src: str, dest: str) -> None:
 _ASSET_API: dict[str, str] = {}
 
 
-def _asset_api_request(url: str) -> urllib.request.Request:
-    return urllib.request.Request(url, headers={
+def _asset_api_request(url: str, start: int = 0) -> urllib.request.Request:
+    headers = {
         "User-Agent": USER_AGENT,
         # 必须 octet-stream：默认的 vnd.github+json 会返回资产的元数据 JSON，
         # 而不是文件本身。
         "Accept": "application/octet-stream",
-    })
+    }
+    if start:
+        headers["Range"] = f"bytes={start}-"
+    return urllib.request.Request(url, headers=headers)
 
 
-def _stream(url: str, dest: str, label: str, req: urllib.request.Request) -> None:
-    """流式写盘并显示「已下载 / 总量 / 速度 / 预计剩余」。
+def _content_range(resp) -> tuple[int, int]:
+    """解析 Content-Range: bytes 100-999/1000，返回 (起点, 总大小)。
 
-    708 MB 这一步只给一个百分比太干；速度能让人判断要不要等，ETA 能让人决定
-    先去干别的。非交互环境（日志、CI）每 10% 打一行，别刷屏。
+    解析不出来返回 (-1, 0)；调用方据此判断服务端到底认不认 Range。
+    """
+    raw = resp.headers.get("Content-Range") or ""
+    m = re.match(r"bytes\s+(\d+)-(\d+)/(\d+)", raw)
+    if not m:
+        return -1, 0
+    return int(m.group(1)), int(m.group(3))
+
+
+def _stream(url: str, dest: str, label: str, make_request, offset: int,
+            known_total: int = 0) -> tuple[int, int]:
+    """把 url 写进 dest，offset > 0 时用 HTTP Range 从该位置续传。
+
+    返回 (实际起点, 文件总大小)。三种情况会放弃续传、整份重下，绝不把两段拼坏：
+    服务端返回 200（不认 Range）、返回 206 但区间起点对不上、文件总大小与上次记录不符。
     """
     tty = sys.stdout.isatty()
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        t0 = time.time()
-        last_draw = 0.0
-        shown_pct = -10
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                now = time.time()
-                elapsed = max(now - t0, 0.001)
-                speed = done / elapsed
-                pct = int(done * 100 / total) if total else 0
-                eta = (total - done) / speed if total and speed > 0 else 0
-                if tty:
-                    if now - last_draw < 0.3 and total:
-                        continue
-                    last_draw = now
-                    bar = "#" * (pct // 4)
-                    left = f"  剩余 {_human_time(eta)}" if eta else ""
-                    sys.stdout.write(
-                        f"\r  {label} [{bar:<25}] {pct:>3}%  {_human(done)}"
-                        f"{'/' + _human(total) if total else ''}"
-                        f"  {_human(speed)}/s{left}   "
-                    )
-                    sys.stdout.flush()
-                elif pct >= shown_pct + 10:
-                    shown_pct = pct - pct % 10
-                    size = f"{_human(done)} / {_human(total)}" if total else _human(done)
-                    left = f"  剩余 {_human_time(eta)}" if eta else ""
-                    print(f"  {label} 已下载 {size} ({pct}%)  {_human(speed)}/s{left}",
-                          flush=True)
-        elapsed = max(time.time() - t0, 0.001)
-        if tty:
-            sys.stdout.write("\n")
-        print(f"  下载完成：{_human(done)}，用时 {_human_time(elapsed)}，"
-              f"平均 {_human(done / elapsed)}/s", flush=True)
+    attempts = 0
+    while True:
+        req = make_request(url, offset)
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            # 416：本地 .part 已不比远端小，或远端文件变短了，丢掉重下。
+            e.close()
+            if e.code == 416 and offset > 0 and attempts < 2:
+                print("  续传位置已失效，从头重新下载…", flush=True)
+                offset = 0
+                attempts += 1
+                continue
+            raise
+
+        with resp:
+            status = getattr(resp, "status", 200)
+            start, remote_total = _content_range(resp)
+            compatible = (
+                offset == 0
+                or (status == 206 and start == offset
+                    and (known_total == 0 or remote_total == known_total))
+            )
+            if not compatible:
+                print("  服务器不支持断点续传或文件已变化，从头重新下载…", flush=True)
+                offset = 0
+                attempts += 1
+                if attempts > 2:
+                    raise SystemExit(f"下载失败：{url} 的续传响应不可用。")
+                continue
+
+            length = int(resp.headers.get("Content-Length") or 0)
+            total = remote_total or (offset + length if length else 0)
+            if offset:
+                size_text = _human(total) if total else "未知大小"
+                print(f"  从 {_human(offset)} 处继续，共 {size_text}", flush=True)
+
+            mode = "ab" if offset else "wb"
+            done = offset
+            t0 = time.time()
+            last_draw = 0.0
+            shown_pct = -10
+            shown_bytes = 0
+            with open(dest, mode) as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    session = done - offset
+                    now = time.time()
+                    elapsed = max(now - t0, 0.001)
+                    speed = session / elapsed
+                    pct = int(done * 100 / total) if total else 0
+                    eta = (total - done) / speed if total and speed > 0 else 0
+                    if tty:
+                        if now - last_draw < 0.3 and total:
+                            continue
+                        last_draw = now
+                        bar = "#" * (pct // 4)
+                        left = f"  剩余 {_human_time(eta)}" if eta else ""
+                        sess = f"  本次 {_human(session)}" if offset else ""
+                        sys.stdout.write(
+                            f"\r  {label} [{bar:<25}] {pct:>3}%  {_human(done)}"
+                            f"{'/' + _human(total) if total else ''}"
+                            f"  {_human(speed)}/s{left}{sess}   "
+                        )
+                        sys.stdout.flush()
+                    elif total and pct >= shown_pct + 10:
+                        shown_pct = pct - pct % 10
+                        size = f"{_human(done)} / {_human(total)}"
+                        left = f"  剩余 {_human_time(eta)}" if eta else ""
+                        sess = f"  本次续 {_human(session)}" if offset else ""
+                        print(f"  {label} 已下载 {size} ({pct}%)  {_human(speed)}/s"
+                              f"{left}{sess}", flush=True)
+                    elif not total and session >= shown_bytes + (32 << 20):
+                        shown_bytes = session
+                        sess = f"  本次续 {_human(session)}" if offset else ""
+                        print(f"  {label} 已下载 {_human(done)}{sess}", flush=True)
+
+            elapsed = max(time.time() - t0, 0.001)
+            session = done - offset
+            if tty:
+                sys.stdout.write("\n")
+            extra = f"，本次续传 {_human(session)}" if offset else ""
+            print(f"  下载完成：{_human(done)}，用时 {_human_time(elapsed)}，"
+                  f"平均 {_human(session / elapsed)}/s{extra}", flush=True)
+            if total and done < total:
+                raise OSError(f"下载未完成：只收到 {_human(done)} / {_human(total)}")
+            return offset, total
 
 
-def download(url: str, dest: str, label: str = "") -> None:
-    """下载到 dest。第一跳失败时换 API 资产地址再试一次。"""
+def _part_paths(part_dir: str, name: str, url: str, suffix: str) -> tuple[str, str]:
+    """按「资产名 + 源地址」生成 .part 与进度记录路径。
+
+    URL 参与命名，换源时天然落在另一个 .part 上 —— 不同源的半截文件绝不拼接。
+    """
+    token = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+    stem = os.path.splitext(name)[0]
+    base = os.path.join(part_dir, f"lawfetch-{stem}-{token}{suffix}")
+    return base + ".part", base + ".part.json"
+
+
+def _part_offset(part: str, meta: str, url: str,
+                 expect_sha: str) -> tuple[int, int]:
+    """读已有 .part 的续传起点和上次记录的总大小。
+
+    进度记录对不上（换了源、换了版本、记录损坏）就丢弃半截文件，从头下载。
+    """
+    if not os.path.isfile(part):
+        if os.path.exists(meta):
+            os.remove(meta)
+        return 0, 0
     try:
-        _stream(url, dest, label, _request(url))
-        return
+        with open(meta, encoding="utf-8") as f:
+            info = json.load(f)
+    except (OSError, ValueError):
+        info = {}
+    if info.get("url") != url or (info.get("sha256") or "") != expect_sha:
+        print("  上次的下载来自另一个源或版本，丢弃半截文件，从头下载…", flush=True)
+        os.remove(part)
+        if os.path.exists(meta):
+            os.remove(meta)
+        return 0, 0
+    return os.path.getsize(part), int(info.get("total") or 0)
+
+
+def _write_meta(meta: str, url: str, expect_sha: str, total: int) -> None:
+    with open(meta, "w", encoding="utf-8") as f:
+        json.dump({"url": url, "sha256": expect_sha, "total": total}, f,
+                  ensure_ascii=False)
+
+
+def _discard(part: str, meta: str) -> None:
+    for path in (part, meta):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _download_route(url: str, make_request, part_dir: str, name: str,
+                    suffix: str, expect_sha: str) -> tuple[str, str]:
+    part, meta = _part_paths(part_dir, name, url, suffix)
+    offset, known_total = _part_offset(part, meta, url, expect_sha)
+    # 先写一条进度记录，中途 Ctrl+C 也能凭它判断这半截文件属于哪个源、哪个版本。
+    _write_meta(meta, url, expect_sha, known_total)
+    offset, total = _stream(url, part, name, make_request, offset, known_total)
+    _write_meta(meta, url, expect_sha, total)
+    return part, meta
+
+
+def download(url: str, part_dir: str, suffix: str, name: str,
+             expect_sha: str = "") -> tuple[str, str]:
+    """下载到 part_dir 下的 .part（支持续传），返回 (part, meta)。
+
+    第一跳失败时换 API 资产地址再试一次；两条路由各自一份 .part，不混用。
+    """
+    try:
+        return _download_route(url, _request, part_dir, name, suffix, expect_sha)
     except urllib.error.HTTPError as e:
         first_err: BaseException = SystemExit(f"下载失败（HTTP {e.code}）：{url}\n{e.reason}")
     except (urllib.error.URLError, OSError) as e:
@@ -233,12 +365,12 @@ def download(url: str, dest: str, label: str = "") -> None:
         reason = getattr(e, "reason", None) or e
         first_err = SystemExit(f"连不上 {url}\n  {reason}")
 
-    api_url = _ASSET_API.get(label)
+    api_url = _ASSET_API.get(name)
     if not api_url or api_url == url:
         raise first_err
-    print(f"  {label} 直连失败，改用备用地址重试…")
+    print(f"  {name} 直连失败，改用备用地址重试…")
     try:
-        _stream(api_url, dest, label, _asset_api_request(api_url))
+        return _download_route(api_url, _asset_api_request, part_dir, name, suffix, expect_sha)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         raise first_err
 
@@ -408,6 +540,14 @@ def _all_sources_failed(tried: list[str]) -> str:
     )
 
 
+_GITHUB_HINT = (
+    "\n  国内网络访问 GitHub 常被阻断，可以：\n"
+    "    1) 设置代理后重试：export https_proxy=http://127.0.0.1:7890\n"
+    "    2) 用浏览器手动下载 Release 附件，再执行：\n"
+    "       python3 tools/fetch_data.py --from-file 下载的文件"
+)
+
+
 def install_from_file(src: str, db: str, expect_sha: str | None) -> None:
     print(f"从本地文件安装：{src}")
     if expect_sha:
@@ -507,39 +647,50 @@ def _pick_full(manifest: dict, prefer_gz: bool, have: set) -> dict:
     return art
 
 
-def _fetch_one(art: dict, url: str) -> str:
-    """下载一个资产并校验 sha256。返回本地临时文件路径，调用方负责删。
+def _fetch_one(art: dict, url: str, part_dir: str,
+               allow_retry: bool = True) -> str:
+    """下载一个资产并校验 sha256。返回本地文件路径，调用方负责删。
 
-    后缀跟着资产名走：增量包要靠 .gz 后缀决定解不解压。
+    .part 留在 part_dir 里，中断后重跑能续传。校验不过先丢弃整份、重新完整下载
+    一次，绝不在可疑的半截文件上继续拼。
     """
     expect = art.get("sha256")
     if not expect:
         # 没有校验值就没法判断这个源给的是不是完整数据；宁可换源，也不装来路不明的包。
         raise SystemExit(f"manifest 里没有 {art['name']} 的 sha256，拒绝安装未校验的数据。")
     suffix = os.path.splitext(art["name"])[1]
-    fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="lawfetch-")
-    os.close(fd)
-    try:
-        download(url, tmp, art["name"])
-        got = _sha256(tmp)
-        if got != expect:
+    part, meta = download(url, part_dir, suffix, art["name"], expect)
+    got = _sha256(part)
+    if got != expect:
+        _discard(part, meta)
+        if not allow_retry:
             raise SystemExit(
-                f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n文件可能损坏或被改动。")
-        print("  校验通过")
-    except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        raise
-    return tmp
+                f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n"
+                "文件可能损坏或被改动，已删除下载内容。")
+        print(f"  校验失败：期望 {expect[:16]}…，实际 {got[:16]}…")
+        print("  已删除这份可疑数据，从头重新下载一次…")
+        return _fetch_one(art, url, part_dir, allow_retry=False)
+
+    print("  校验通过")
+    final = part[:-len(".part")]
+    os.replace(part, final)
+    try:
+        os.remove(meta)
+    except OSError:
+        pass
+    return final
 
 
 def _run_source(label: str, manifest: dict, assets: dict, db: str,
-                cur_ver: str | None, args) -> None:
+                cur_ver: str | None, args, announce_source: bool = True) -> None:
     """从一个源完成安装：有增量且版本够近就走增量，失败自动回落全量。
 
     任何一步失败都抛 SystemExit，由 main() 接住换下一个源 —— 单个源坏掉
     （镜像挂了、文件被截断、sha256 对不上）不该让整次安装停在这里。
+    announce_source=False 用于只有 GitHub 的模式，保持与旧版逐行一致的日志。
     """
+    part_dir = os.path.join(os.path.dirname(db) or ".", ".downloads")
+    os.makedirs(part_dir, exist_ok=True)
     have = set(assets)
     art = None
     if cur_ver and not args.full:
@@ -557,15 +708,18 @@ def _run_source(label: str, manifest: dict, assets: dict, db: str,
         tmp = None
         try:
             _step("下载增量包")
-            tmp = _fetch_one(art, url)
+            tmp = _fetch_one(art, url, part_dir)
             _step("应用增量")
             result = install_delta(tmp, db)
-            print(f"\n已更新到 {result.get('to_version')}（来源：{label}）。")
+            note = f"（来源：{label}）" if announce_source else ""
+            print(f"\n已更新到 {result.get('to_version')}{note}。")
             return
         except SystemExit as e:
             # 增量这条路任何一步不通（格式不认、本地版本太老、解压失败…）
             # 都退回全量，而不是把用户顶在这里。
-            print(f"\n增量更新未成功（来源：{label}）：{e}")
+            prefix = (f"\n增量更新未成功（来源：{label}）" if announce_source
+                      else "\n增量更新未成功")
+            print(f"{prefix}：{e}")
             print("改成下载全量库，这一步会重新下 600 MB 以上，请稍等。")
             art = None
         finally:
@@ -583,7 +737,7 @@ def _run_source(label: str, manifest: dict, assets: dict, db: str,
     tmp = None
     try:
         _step(f"下载 {art['name']}")
-        tmp = _fetch_one(art, url)   # 内含 sha256 校验，校验不过会抛错并清理临时文件
+        tmp = _fetch_one(art, url, part_dir)   # 内含 sha256 校验，校验不过会整份重下
         _step("解压并安装")
         install_from_file(tmp, db, None)
     finally:
@@ -632,6 +786,35 @@ def main() -> int:
         print(f"仓库：{repo}")
     if bases:
         print(f"镜像：{len(bases)} 个（按配置顺序尝试，GitHub 最后兜底）")
+
+    if not bases:
+        # 没配镜像时完全走 GitHub：一次请求、与旧版逐行一致的日志，
+        # 不会多探镜像、也不会走到「全源失败」那条提示。
+        manifest, assets = fetch_manifest(repo)
+        remote_ver = manifest.get("corpus_version", "")
+        print(f"Release：{manifest.get('corpus_version')}  "
+              f"（法规 {manifest.get('law_count', '?')} 部 / "
+              f"法条 {manifest.get('article_count', '?')} 条）")
+
+        cur_ver = local_version(db)
+        if cur_ver:
+            print(f"本地：{cur_ver}  →  {db}")
+        else:
+            print(f"本地：无可用库（{db}）")
+
+        if cur_ver and version_key(cur_ver) >= version_key(remote_ver) and not args.full:
+            print("\n已是最新，无需下载。要强制重下全量，加 --full。")
+            return 0
+        if args.check:
+            print("\n有新版本可用，执行 python3 tools/fetch_data.py 下载。")
+            return 0
+
+        try:
+            _run_source(f"GitHub {repo}", manifest, assets, db, cur_ver, args,
+                        announce_source=False)
+        except SystemExit as e:
+            raise SystemExit(f"{e}{_GITHUB_HINT}")
+        return 0
 
     # 收集所有可用源：镜像按用户给的顺序在前，GitHub 永远最后。
     sources: list[tuple[str, dict, dict]] = []
