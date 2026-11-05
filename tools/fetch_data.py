@@ -15,6 +15,11 @@
   python3 tools/fetch_data.py --repo owner/name
   python3 tools/fetch_data.py --from-file dist/law_data-2026.10.30.1.db.gz   # 离线：用本地已下好的包
 
+国内镜像（按顺序尝试，GitHub 永远最后兜底）：
+  export LAW_DATA_MIRRORS="https://gitee.com/<账号>/<仓库>/raw/master https://cdn.example.com/law-data"
+每个镜像目录里放 manifest.json 和发布资产，文件名与 manifest 里的 artifacts[].name 一致。
+每个源都按 manifest 里的 sha256 校验，校验不过视为该源失败，自动换下一个。
+
 只用标准库。解压优先 zstd（更快），本机没有 zstandard 库也没有 zstd 命令时，
 自动改下 .gz（gzip 是 Python 内置，一定能用）。
 """
@@ -33,6 +38,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -60,6 +66,17 @@ def _human(n: float) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
+
+def _human_time(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds} 秒"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {sec:02d} 秒"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes:02d} 分"
 
 
 def _step(name: str) -> None:
@@ -155,13 +172,18 @@ def _asset_api_request(url: str) -> urllib.request.Request:
 
 
 def _stream(url: str, dest: str, label: str, req: urllib.request.Request) -> None:
-    """流式写盘并显示进度。失败原样抛出，由调用方决定要不要换路重试。"""
+    """流式写盘并显示「已下载 / 总量 / 速度 / 预计剩余」。
+
+    708 MB 这一步只给一个百分比太干；速度能让人判断要不要等，ETA 能让人决定
+    先去干别的。非交互环境（日志、CI）每 10% 打一行，别刷屏。
+    """
     tty = sys.stdout.isatty()
     with urllib.request.urlopen(req, timeout=60) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0
         t0 = time.time()
-        shown = -1
+        last_draw = 0.0
+        shown_pct = -10
         with open(dest, "wb") as f:
             while True:
                 chunk = resp.read(1 << 20)
@@ -169,20 +191,34 @@ def _stream(url: str, dest: str, label: str, req: urllib.request.Request) -> Non
                     break
                 f.write(chunk)
                 done += len(chunk)
+                now = time.time()
+                elapsed = max(now - t0, 0.001)
+                speed = done / elapsed
                 pct = int(done * 100 / total) if total else 0
+                eta = (total - done) / speed if total and speed > 0 else 0
                 if tty:
-                    speed = done / max(time.time() - t0, 0.001)
+                    if now - last_draw < 0.3 and total:
+                        continue
+                    last_draw = now
                     bar = "#" * (pct // 4)
+                    left = f"  剩余 {_human_time(eta)}" if eta else ""
                     sys.stdout.write(
                         f"\r  {label} [{bar:<25}] {pct:>3}%  {_human(done)}"
-                        f"{'/' + _human(total) if total else ''}  {_human(speed)}/s   "
+                        f"{'/' + _human(total) if total else ''}"
+                        f"  {_human(speed)}/s{left}   "
                     )
                     sys.stdout.flush()
-                elif pct >= shown + 10:
-                    shown = pct - pct % 10
-                    print(f"  {label} {shown}%  {_human(done)}", flush=True)
+                elif pct >= shown_pct + 10:
+                    shown_pct = pct - pct % 10
+                    size = f"{_human(done)} / {_human(total)}" if total else _human(done)
+                    left = f"  剩余 {_human_time(eta)}" if eta else ""
+                    print(f"  {label} 已下载 {size} ({pct}%)  {_human(speed)}/s{left}",
+                          flush=True)
+        elapsed = max(time.time() - t0, 0.001)
         if tty:
             sys.stdout.write("\n")
+        print(f"  下载完成：{_human(done)}，用时 {_human_time(elapsed)}，"
+              f"平均 {_human(done / elapsed)}/s", flush=True)
 
 
 def download(url: str, dest: str, label: str = "") -> None:
@@ -195,18 +231,12 @@ def download(url: str, dest: str, label: str = "") -> None:
     except (urllib.error.URLError, OSError) as e:
         # OSError 覆盖读流超时（socket.timeout）和中途断连：这类错误以前会直接抛栈。
         reason = getattr(e, "reason", None) or e
-        first_err = SystemExit(
-            f"连不上 {url}\n  {reason}\n"
-            "  国内网络访问 GitHub 常被阻断，可以：\n"
-            "    1) 设置代理后重试：export https_proxy=http://127.0.0.1:7890\n"
-            "    2) 用浏览器手动下载 Release 附件，再执行：\n"
-            "       python3 tools/fetch_data.py --from-file 下载的文件"
-        )
+        first_err = SystemExit(f"连不上 {url}\n  {reason}")
 
     api_url = _ASSET_API.get(label)
     if not api_url or api_url == url:
         raise first_err
-    print(f"  {label} 常规地址不通，改用 API 资产接口重试…")
+    print(f"  {label} 直连失败，改用备用地址重试…")
     try:
         _stream(api_url, dest, label, _asset_api_request(api_url))
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
@@ -305,6 +335,77 @@ def _read_asset_json(name: str, url: str) -> dict:
             pass
     with urllib.request.urlopen(_request(url), timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+# ---------------------------------------------------------------- 下载源
+
+def mirror_bases() -> list[str]:
+    """LAW_DATA_MIRRORS（兼容单数 LAW_DATA_MIRROR）里的镜像目录，保持用户顺序。
+
+    目录里要放 manifest.json 和发布资产，资产名与 artifacts[].name 一致。
+    分隔符认逗号、分号、空白，用户从聊天窗口复制来的串通常混着这几种。
+    """
+    raw = os.environ.get("LAW_DATA_MIRRORS") or os.environ.get("LAW_DATA_MIRROR") or ""
+    return [b.strip().rstrip("/") for b in re.split(r"[,;\s]+", raw) if b.strip()]
+
+
+def _mirror_request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Accept": "*/*",   # 静态文件服务器不认 GitHub 的媒体类型
+    })
+
+
+def load_mirror(base: str) -> tuple[str, dict, dict] | None:
+    """读镜像目录里的 manifest.json。失败只警告并返回 None，由调用方换下一个源。"""
+    label = f"镜像 {base}"
+    url = f"{base}/manifest.json"
+    try:
+        with urllib.request.urlopen(_mirror_request(url), timeout=15) as resp:
+            manifest = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"  跳过 {label}：manifest 读取失败（HTTP {e.code}）")
+        return None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        reason = getattr(e, "reason", None) or e
+        print(f"  跳过 {label}：{reason}")
+        return None
+    if not isinstance(manifest, dict) or not manifest.get("corpus_version"):
+        print(f"  跳过 {label}：manifest.json 格式不对（缺 corpus_version）")
+        return None
+
+    assets = {"manifest.json": url}
+    for art in manifest.get("artifacts", []):
+        if art.get("name"):
+            # 资产默认按「与 manifest 同目录」拼。清单和增量放 Gitee、全量放对象存储
+            # 这种组合，可以在 manifest 里给单个资产写绝对地址（artifacts[].url）。
+            assets[art["name"]] = art.get("url") or f"{base}/{urllib.parse.quote(art['name'])}"
+    return label, manifest, assets
+
+
+def load_github(repo: str) -> tuple[str, dict, dict] | None:
+    """GitHub 永远作为最后一个源。失败只警告，不打断其它镜像。"""
+    try:
+        manifest, assets = fetch_manifest(repo)
+    except SystemExit as e:
+        print(f"  跳过 GitHub：{e}")
+        return None
+    return f"GitHub {repo}", manifest, assets
+
+
+def _all_sources_failed(tried: list[str]) -> str:
+    return (
+        "所有下载源都失败了，没有安装任何数据。\n"
+        f"  已尝试：{'、'.join(tried) or '（无）'}\n"
+        "\n"
+        "可以这样处理：\n"
+        "  1) 配置国内镜像后重试（按顺序尝试，GitHub 永远最后兜底）：\n"
+        '     export LAW_DATA_MIRRORS="https://gitee.com/<账号>/<仓库>/raw/master"\n'
+        "  2) 浏览器打开官方 Release 页手动下载：\n"
+        "     https://github.com/tlgzs/china-law-search/releases/latest\n"
+        "     然后：python3 tools/fetch_data.py --from-file 下载到的文件\n"
+        "  3) 有代理的话：export https_proxy=http://127.0.0.1:7890 后重试"
+    )
 
 
 def install_from_file(src: str, db: str, expect_sha: str | None) -> None:
@@ -411,22 +512,83 @@ def _fetch_one(art: dict, url: str) -> str:
 
     后缀跟着资产名走：增量包要靠 .gz 后缀决定解不解压。
     """
+    expect = art.get("sha256")
+    if not expect:
+        # 没有校验值就没法判断这个源给的是不是完整数据；宁可换源，也不装来路不明的包。
+        raise SystemExit(f"manifest 里没有 {art['name']} 的 sha256，拒绝安装未校验的数据。")
     suffix = os.path.splitext(art["name"])[1]
     fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="lawfetch-")
     os.close(fd)
     try:
         download(url, tmp, art["name"])
         got = _sha256(tmp)
-        expect = art.get("sha256")
-        if expect and got != expect:
+        if got != expect:
             raise SystemExit(
-                f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n文件可能损坏，请重试。")
+                f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n文件可能损坏或被改动。")
         print("  校验通过")
     except BaseException:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
     return tmp
+
+
+def _run_source(label: str, manifest: dict, assets: dict, db: str,
+                cur_ver: str | None, args) -> None:
+    """从一个源完成安装：有增量且版本够近就走增量，失败自动回落全量。
+
+    任何一步失败都抛 SystemExit，由 main() 接住换下一个源 —— 单个源坏掉
+    （镜像挂了、文件被截断、sha256 对不上）不该让整次安装停在这里。
+    """
+    have = set(assets)
+    art = None
+    if cur_ver and not args.full:
+        delta = pick_artifact(manifest.get("artifacts", []), "delta", args.prefer_gz, have)
+        if delta and delta.get("min_version") and (
+                version_key(cur_ver) >= version_key(delta["min_version"])):
+            art = delta
+            print(f"\n本机版本 {cur_ver} 在增量范围内，只下变更部分"
+                  f"（{_human(delta.get('size') or 0)}）。")
+
+    if art is not None:
+        url = assets.get(art["name"])
+        if not url:
+            raise SystemExit(f"manifest 列了增量包 {art['name']}，但这个源里没有该文件。")
+        tmp = None
+        try:
+            _step("下载增量包")
+            tmp = _fetch_one(art, url)
+            _step("应用增量")
+            result = install_delta(tmp, db)
+            print(f"\n已更新到 {result.get('to_version')}（来源：{label}）。")
+            return
+        except SystemExit as e:
+            # 增量这条路任何一步不通（格式不认、本地版本太老、解压失败…）
+            # 都退回全量，而不是把用户顶在这里。
+            print(f"\n增量更新未成功（来源：{label}）：{e}")
+            print("改成下载全量库，这一步会重新下 600 MB 以上，请稍等。")
+            art = None
+        finally:
+            if tmp and not args.keep and os.path.exists(tmp):
+                os.remove(tmp)
+
+    if art is None:
+        art = _pick_full(manifest, args.prefer_gz, have)
+
+    url = assets.get(art["name"])
+    if not url:
+        raise SystemExit(f"manifest 列了 {art['name']}，但这个源里没有该文件。")
+
+    os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
+    tmp = None
+    try:
+        _step(f"下载 {art['name']}")
+        tmp = _fetch_one(art, url)   # 内含 sha256 校验，校验不过会抛错并清理临时文件
+        _step("解压并安装")
+        install_from_file(tmp, db, None)
+    finally:
+        if tmp and not args.keep and os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def main() -> int:
@@ -459,18 +621,48 @@ def main() -> int:
         return 0
 
     repo = args.repo or guess_repo()
-    if not repo:
+    bases = mirror_bases()
+    if not repo and not bases:
         raise SystemExit(
             "不知道该从哪个仓库下载。请指定：\n"
             "  python3 tools/fetch_data.py --repo owner/china-law-search\n"
             "或设置环境变量 LAW_REPO=owner/china-law-search。"
         )
+    if repo:
+        print(f"仓库：{repo}")
+    if bases:
+        print(f"镜像：{len(bases)} 个（按配置顺序尝试，GitHub 最后兜底）")
 
-    print(f"仓库：{repo}")
-    manifest, assets = fetch_manifest(repo)
-    remote_ver = manifest.get("corpus_version", "")
-    print(f"Release：{manifest.get('corpus_version')}  "
-          f"（法规 {manifest.get('law_count', '?')} 部 / 法条 {manifest.get('article_count', '?')} 条）")
+    # 收集所有可用源：镜像按用户给的顺序在前，GitHub 永远最后。
+    sources: list[tuple[str, dict, dict]] = []
+    for base in bases:
+        src = load_mirror(base)
+        if src:
+            sources.append(src)
+    if repo:
+        src = load_github(repo)
+        if src:
+            sources.append(src)
+
+    if not sources:
+        tried = [f"镜像 {b}" for b in bases] + ([f"GitHub {repo}"] if repo else [])
+        raise SystemExit(_all_sources_failed(tried))
+
+    # 每个源标称的版本可能不同，取最高的那批先用；那一批全失败再退到次高版本。
+    groups: dict[tuple, list] = {}
+    for src in sources:
+        key = version_key(src[1].get("corpus_version") or "")
+        groups.setdefault(key, []).append(src)
+    order = sorted(groups, reverse=True)
+
+    for label, manifest, _ in sources:
+        print(f"  {label}: {manifest.get('corpus_version', '?')}")
+
+    best_label, best_manifest, _ = groups[order[0]][0]
+    remote_ver = best_manifest.get("corpus_version", "")
+    print(f"Release：{remote_ver}  "
+          f"（法规 {best_manifest.get('law_count', '?')} 部 / "
+          f"法条 {best_manifest.get('article_count', '?')} 条，来自 {best_label}）")
 
     cur_ver = local_version(db)
     if cur_ver:
@@ -483,71 +675,25 @@ def main() -> int:
         return 0
 
     if args.check:
-        print("\n有新版本可用，执行 python3 tools/fetch_data.py 下载。")
+        print(f"\n有新版本可用，将从 {best_label} 下载。")
         return 0
 
-    # 增量包按「累积变更集」发布：包里是账本内每部法规的最终态全文，
-    # 只要本地不早于 min_version 就能整部替换，不要求和上一版精确配对。
-    have = set(assets)
-    art = None
-    if cur_ver and not args.full:
-        delta = pick_artifact(manifest.get("artifacts", []), "delta", args.prefer_gz, have)
-        if delta and delta.get("min_version") and (
-                version_key(cur_ver) >= version_key(delta["min_version"])):
-            art = delta
-            print(f"\n本机版本 {cur_ver} 在增量范围内，只下变更部分"
-                  f"（{_human(delta.get('size') or 0)}）。")
+    # 按版本从高到低、同版本按用户给的顺序逐个尝试；任一源失败自动换下一个。
+    tried: list[str] = []
+    for key in order:
+        for label, manifest, assets in groups[key]:
+            tried.append(label)
+            try:
+                _run_source(label, manifest, assets, db, cur_ver, args)
+                return 0
+            except SystemExit as e:
+                print(f"\n源 {label} 失败：{e}")
+                print("换下一个下载源重试…")
+            except Exception as e:  # noqa: BLE001 - 单个源的意外错误不应中断整次安装
+                print(f"\n源 {label} 出错：{e}")
+                print("换下一个下载源重试…")
 
-    if art is not None:
-        url = assets.get(art["name"])
-        if not url:
-            raise SystemExit(f"Release 里找不到资产 {art['name']}。")
-        tmp = None
-        try:
-            _step("下载增量包")
-            tmp = _fetch_one(art, url)
-            _step("应用增量")
-            result = install_delta(tmp, db)
-            print(f"\n已更新到 {result.get('to_version')}。")
-            return 0
-        except SystemExit as e:
-            # 增量这条路任何一步不通（格式不认、本地版本太老、解压失败…）
-            # 都退回全量，而不是把用户顶在这里。
-            print(f"\n增量更新未成功：{e}")
-            print("改成下载全量库，这一步会重新下 600 MB 以上，请稍等。")
-        finally:
-            if tmp and not args.keep and os.path.exists(tmp):
-                os.remove(tmp)
-        art = _pick_full(manifest, args.prefer_gz, have)
-
-    # 全新安装（本地没有库）走不到上面的增量分支，art 一直是 None。
-    # 少了这一步，下面 os.path.splitext(art["name"]) 会抛 TypeError，
-    # 用户看到一段栈，数据一点没下。
-    if art is None:
-        art = _pick_full(manifest, args.prefer_gz, have)
-
-    url = assets.get(art["name"])
-    if not url:
-        raise SystemExit(f"Release 里找不到资产 {art['name']}，无法下载。")
-
-    os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
-    fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(art["name"])[1], prefix="lawfetch-")
-    os.close(fd)
-    try:
-        _step(f"下载 {art['name']}")
-        download(url, tmp, art["name"])
-        _step("校验 sha256")
-        got = _sha256(tmp)
-        expect = art.get("sha256")
-        if expect and got != expect:
-            raise SystemExit(f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n文件可能损坏，请重试。")
-        print("  校验通过")
-        _step("解压并安装")
-        install_from_file(tmp, db, None)
-    finally:
-        if not args.keep and os.path.exists(tmp):
-            os.remove(tmp)
-    return 0
+    raise SystemExit(_all_sources_failed(tried))
 
 
 if __name__ == "__main__":

@@ -78,9 +78,9 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 python3 --version
 ```
 
-本地查询服务（`server/`）用到 3.10 才有的语法，**3.9 启动时会直接报错**：
-`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`。
-下载数据（`tools/`）和 MCP 服务器（`mcp/`）只用标准库，3.9 也能跑，但网页服务跑不了。
+**整个仓库统一要求 Python 3.10 以上**：下载脚本、MCP 服务器和本地查询服务都一样。
+低于 3.10 时服务启动会报 `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`，
+启动脚本会提前拦住并给出下面的安装命令。
 
 macOS 自带的通常就是 3.9，**不要改动系统 Python**，另建一个独立环境即可。
 下面三条任选一条，都不会改系统设置，也不会影响别的项目（在仓库目录里执行）：

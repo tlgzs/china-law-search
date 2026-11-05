@@ -10,17 +10,19 @@ permissions:
 
 jobs:
   check:
+    name: 语法与仓库检查（Python 3.10）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.10"
 
-      # 3.9 是硬底线：macOS 自带的就是它，用户不该为了查法条先装运行时。
-      # 这里只做语法编译，不导入——核心链路零第三方依赖，导入也不需要装包。
-      - name: 语法编译（Python 3.9）
+      # 最低版本 3.10：服务端代码用了 X | None 这类运行时求值的写法，
+      # 3.9 下仅 py_compile 能过，一启动就报 TypeError。真实运行由上方的
+      # runtime job 覆盖，这里只做语法编译和仓库文件检查。
+      - name: 语法编译（Python 3.10）
         run: python -m py_compile server/*.py mcp/*.py tools/*.py ingest/*.py
 
       - name: 校验 issue 表单
@@ -57,3 +59,89 @@ jobs:
             exit 1
           fi
           echo "无占位符"
+
+  runtime:
+    name: 运行时启动（Python 3.10，真打 /health）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装 Web 依赖
+        run: python -m pip install --quiet -r requirements.txt
+
+      - name: 导入服务模块
+        run: python -c "import server.law_search_service as m; print('import OK', m.APP_VERSION)"
+
+      # 没有数据库也要能起来：data/ 目录不存在时 sqlite 打不开，服务会直接失败。
+      - name: 启动服务并检查 /health
+        run: |
+          mkdir -p data
+          python -m uvicorn server.law_search_service:app --host 127.0.0.1 --port 8001 >/tmp/uvicorn.log 2>&1 &
+          PID=$!
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -sf -o /tmp/health.json http://127.0.0.1:8001/health; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::服务 30 秒内没有就绪"
+            cat /tmp/uvicorn.log
+            kill "$PID" 2>/dev/null || true
+            exit 1
+          fi
+          cat /tmp/health.json
+          python - <<'PY'
+          import json
+
+          data = json.load(open("/tmp/health.json", encoding="utf-8"))
+          assert data.get("status") in ("ok", "degraded"), data
+          print("健康检查通过：status =", data.get("status"))
+          PY
+          kill "$PID" 2>/dev/null || true
+          cat /tmp/uvicorn.log
+
+  guard:
+    name: 版本守卫（Python 3.9 必须拒绝启动）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # 这条守着「最低 3.10」的声明本身：将来若有人顺手把版本检查放宽，
+      # 这个 job 会红，而不是等用户装完才在启动时炸。
+      - name: check_python.py 应给出提示并退出 1
+        run: |
+          set +e
+          out=$(python tools/check_python.py 2>&1)
+          code=$?
+          echo "$out"
+          if [ "$code" -ne 1 ]; then
+            echo "::error::3.9 下 check_python.py 应退出 1，实际 $code"
+            exit 1
+          fi
+          echo "$out" | grep -q "需要 Python 3.10" || {
+            echo "::error::提示里没有说明需要 Python 3.10"
+            exit 1
+          }
+
+      - name: start.sh 应拦截并以非 0 退出
+        run: |
+          set +e
+          out=$(./start.sh 2>&1)
+          code=$?
+          echo "$out"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::3.9 下启动脚本不应继续启动服务"
+            exit 1
+          fi
+          echo "$out" | grep -q "需要 Python 3.10" || {
+            echo "::error::启动脚本没有给出人话版本提示"
+            exit 1
+          }

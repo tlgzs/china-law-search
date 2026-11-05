@@ -36,9 +36,8 @@
 
 下文命令写作 `python3`。Windows 上如果提示找不到该命令，换成 `python`。
 
-> **Python 版本**：下载数据、接入 agent 只用标准库，`python3` 3.9 也能跑；
-> **本地查询服务**（`server/`，FastAPI）需要 **3.10 或更高**。
-> macOS 自带的 3.9 不够启动网页服务，另建一个独立虚拟环境即可，不动系统 Python ——
+> **Python 版本要求：3.10 或更高**（整个仓库统一按这个口径）。
+> macOS 自带的 3.9 不够用，另建一个独立虚拟环境即可，不动系统 Python ——
 > 完整命令见 [`INSTALL.md` 3.1](INSTALL.md#31-确认本机有-python-310-以上)。
 
 ### 一、接进 agent（不需装任何依赖）
@@ -50,8 +49,7 @@ python3 tools/fetch_data.py            # 下载数据包并校验
 python3 mcp/install.py --all --yes     # 写入本机 agent 配置
 ```
 
-MCP 服务器只用 Python 标准库，不需要 `pip install` 任何东西，Python 3.9 就能跑。
-（本地查询服务是另一回事，要 3.10 以上，见下一节。）
+MCP 服务器只用 Python 标准库，不需要 `pip install` 任何东西；Python 需要 3.10 以上。
 装完在 WorkBuddy 的连接器页点「信任」，Trae 和 Cursor 重启客户端即生效。
 四个工具怎么用见 [`mcp/README.md`](mcp/README.md)。
 
@@ -125,6 +123,21 @@ python3 tools/fetch_data.py --repo tlgzs/china-law-search
 ```
 
 自己 fork 过、想从上游取数据时，也用这个参数。
+
+### 国内下载慢或连不上 GitHub
+
+可以配置国内镜像。把多个源写进 `LAW_DATA_MIRRORS`（空格、逗号、分号都行），
+脚本按顺序尝试，任一源失败自动换下一个，每个文件都按 manifest 里的 `sha256` 校验，
+校验不过视为该源失败，最后仍回落 GitHub：
+
+```bash
+export LAW_DATA_MIRRORS="https://gitee.com/你的账号/china-law-search-data/raw/master"
+python3 tools/fetch_data.py
+```
+
+镜像目录里放 `manifest.json` 和全部资产文件，文件名与 manifest 的 `artifacts[].name` 一致。
+所有源都失败时，脚本会打印已尝试的源、官方 Release 地址和手动下载后的本地安装命令，
+不会只抛一段栈（`LAW_DATA_MIRROR` 单数形式也认）。
 
 ## 数据从哪来
 

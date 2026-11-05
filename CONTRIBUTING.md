@@ -99,11 +99,11 @@ python3 mcp/server.py --selftest       # MCP 自检
 
 几条硬约束：
 
-- **版本底线分两层**。`mcp/` 与 `tools/` 必须保持 **Python 3.9 兼容**（判据是 macOS 自带的
-  `/usr/bin/python3` 能跑），因为它们要保证「不装运行时也能接进 agent」。
-  `server/`（HTTP 服务）当前需要 **Python 3.10+**：FastAPI 路由与 Pydantic 模型里用了
-  `str | None`，3.9 在 import 阶段就会失败。新增 `server/` 代码不要依赖更低版本。
-  启动脚本（`start.sh` / `启动.command` / `启动.bat`）会先做版本自检。
+- **版本底线统一为 Python 3.10+**。仓库所有代码（`server/`、`mcp/`、`tools/`、`ingest/`）
+  都按 3.10 起算：`server/` 的 FastAPI 路由与 Pydantic 模型用了 `str | None`，
+  3.9 在 import 阶段就会失败。CI 里有专门的 3.9 守卫 job 验证「低版本会被拒绝启动」，
+  不要为了让某个 job 变绿而放宽版本检查。启动脚本（`start.sh` / `启动.command` / `启动.bat`）
+  会先做版本自检。
 - **`mcp/` 只准用标准库**。多一个依赖，就多一批装不上的用户。
 - **条号解析与法名归一的规则只有一份**，在 `server/law_query_core.py`。
   HTTP 与 MCP 都必须调它，不允许各写一份——两份规则的结局是「网页查得到、agent 查不到」，

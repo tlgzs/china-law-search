@@ -58,11 +58,33 @@ fi
 export LAW_API_ENFORCE=${LAW_API_ENFORCE:-0}
 export LAW_HOST=${LAW_HOST:-127.0.0.1}
 
-# 8001 被占用时顺延，避免「端口已占用」直接起不来
-PORT=${LAW_PORT:-8001}
-while lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && [ $PORT -lt 8010 ]; do
-  PORT=$((PORT + 1))
-done
+# 8001 被占用时顺延，避免「端口已占用」直接起不来。
+# 用 Python socket 试探，不依赖 lsof —— macOS 自带 lsof，但很多精简 Linux 镜像没有，
+# 用户也不想为启动一个本地服务先装系统工具。
+PORT=$("$VENV/bin/python" - "${LAW_PORT:-8001}" <<'PY'
+import socket
+import sys
+
+for port in range(int(sys.argv[1]), 8011):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        print(port)
+        break
+PY
+)
+if [ -z "$PORT" ]; then
+  echo "端口 8001–8010 都被占用了，服务没能启动。" >&2
+  echo "  先看是谁占着 8001：" >&2
+  echo "    macOS / Linux：lsof -nP -iTCP:8001 -sTCP:LISTEN" >&2
+  echo "    Windows：      netstat -ano | findstr :8001" >&2
+  echo "  或者换一个空闲端口启动：" >&2
+  echo "    LAW_PORT=8020 ./start.sh" >&2
+  exit 2
+fi
 export LAW_PORT=$PORT
 
 URL="http://${LAW_HOST}:${PORT}"
