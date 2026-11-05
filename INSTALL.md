@@ -19,7 +19,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 > 仓库地址 https://github.com/tlgzs/china-law-search ），
 > 请严格按仓库里的 `INSTALL.md` 执行，具体要求：
 >
-> 1. **先检查环境**：本机有没有 `python3`（版本需 ≥ 3.9）和 `git`。
+> 1. **先检查环境**：本机有没有 `python3`（版本需 ≥ 3.10，`python3 --version` 看一下）和 `git`。
 >    缺哪个就告诉我怎么装，**不要自己装系统级软件，也不要改系统 PATH**。
 > 2. **选目录**：默认装在 `~/china-law-search`；如果我已有别的想法我会告诉你。
 >    装之前告诉我你打算装到哪个路径。
@@ -72,19 +72,43 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 
 ## 三、手动安装
 
-### 3.1 确认本机有 Python 3.9 以上
+### 3.1 确认本机有 Python 3.10 以上
 
 ```bash
 python3 --version
 ```
 
-看到 `Python 3.9.x` 或更高就行。macOS 自带的 3.9 够用，不必另装。
+本地查询服务（`server/`）用到 3.10 才有的语法，**3.9 启动时会直接报错**：
+`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`。
+下载数据（`tools/`）和 MCP 服务器（`mcp/`）只用标准库，3.9 也能跑，但网页服务跑不了。
+
+macOS 自带的通常就是 3.9，**不要改动系统 Python**，另建一个独立环境即可。
+下面三条任选一条，都不会改系统设置，也不会影响别的项目（在仓库目录里执行）：
+
+```bash
+# 方式一：uv（推荐，只装到用户目录 ~/.local/bin）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv --python 3.12 .venv
+
+# 方式二：已有 Homebrew
+brew install python@3.12
+python3.12 -m venv .venv
+
+# 方式三：本机已装过 3.12（例如装在自己的工具目录里），能直接调用就行
+python3.12 -m venv .venv
+```
+
+建好后按 3.2 继续；启动脚本会自动复用这个 `.venv`。就算你没单独建，
+`启动.command` / `start.sh` 也会自己找 3.10+ 的解释器来建；一个都找不到时，
+它会打印当前版本、要求版本和上面这段命令后退出，不会抛调用栈。
+
+> `curl -LsSf https://astral.sh/uv/install.sh | sh` 是 uv 官方安装脚本，只把 uv 放进用户
+> 目录，不装任何需要 sudo 的系统软件。不放心可以先下载看一眼再执行：
+> `curl -LsSf https://astral.sh/uv/install.sh -o install-uv.sh && less install-uv.sh && sh install-uv.sh`
 
 Windows 上如果提示找不到 `python3`，换成 `python --version`；本文后面所有
-`python3` 命令在 Windows 上相应换成 `python`。
-
-没装的话：macOS 用 `xcode-select --install`（装命令行工具，自带 Python 3），
-Windows 到 python.org 下载安装包，**安装时勾选 "Add Python to PATH"**。
+`python3` 命令在 Windows 上相应换成 `python`。没装的话到 python.org 下载 3.12 安装包，
+**安装时勾选 "Add Python to PATH"**；装完仍用 `python -m venv .venv` 把依赖隔离在项目里。
 
 ### 3.2 装到哪、怎么装
 
@@ -244,6 +268,7 @@ Windows 上是把 `启动.bat` 的快捷方式放进「启动」文件夹（`Win
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
 | `command not found: python3` | Windows 或精简系统 | 换 `python`；仍不行就装 Python 并勾选 Add to PATH |
+| 启动时报 `TypeError: unsupported operand type(s) for \|: 'type' and 'NoneType'` | 用了 Python 3.9 | 按 3.1 另建 3.10+ 的 `venv`；先 `rm -rf .venv venv` 再重跑启动脚本 |
 | `python3: command not found` 但在 Windows PowerShell | PowerShell 会去应用商店找 | 装完 Python 后重开 PowerShell |
 | `fetch_data.py` 报 404 / 找不到 Release | 仓库名没识别出来，或 Release 还没发布 | 加 `--repo tlgzs/china-law-search`；或去 Releases 页确认有 `manifest.json` |
 | 下载到一半断了 | 网络 | 直接重跑同一条命令，会重新下；旧库不会被破坏 |
@@ -275,6 +300,17 @@ python3 mcp/install.py --remove      # 从各客户端配置里删掉 yilv-law �
 
 然后删掉整个仓库目录即可（数据就在 `china-law-search/data/` 里，一并删掉）。
 `install.py --remove` 不会碰你自己的其他 MCP 配置。
+
+如果按 3.1 的「方式一」装了 uv 和独立的 Python，不想要了可以一并清掉：
+
+```bash
+rm -rf .venv venv                 # 项目自己的虚拟环境（在仓库目录里）
+uv python uninstall 3.12          # 只用 uv 装过的 Python
+rm -rf ~/.local/share/uv ~/.local/bin/uv   # 连 uv 本身也删掉
+```
+
+删除整个 `china-law-search/` 目录会带走代码和 2.4 GB 数据；系统 Python 全程没有被改动，
+不需要也不应该去动它。
 
 ---
 

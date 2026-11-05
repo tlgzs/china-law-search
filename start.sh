@@ -4,10 +4,14 @@
 set -e
 cd "$(dirname "$0")"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "未检测到 python3，请先安装 Python 3.9 以上版本。" >&2
-  exit 1
-fi
+# 优先用已装的 3.10+ 解释器：系统自带的 python3 往往是 3.9，直接拿它建环境等于白装一遍。
+PY=""
+for c in python3.13 python3.12 python3.11 python3.10 python3; do
+  if command -v "$c" >/dev/null 2>&1 &&
+     "$c" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)' >/dev/null 2>&1; then
+    PY="$c"; break
+  fi
+done
 
 # 虚拟环境目录两种命名都认，与 update.sh 保持一致：优先 .venv（脚本自己建的那个），
 # 其次手建的 venv。不这样的话，手工建过 venv 的机器会再建一个 .venv 白装一遍依赖。
@@ -16,15 +20,30 @@ for c in .venv venv; do
   if [ -x "$c/bin/python" ]; then VENV="$c"; break; fi
 done
 if [ -z "$VENV" ]; then
+  if [ -z "$PY" ]; then
+    if command -v python3 >/dev/null 2>&1; then
+      python3 tools/check_python.py
+    else
+      echo "未检测到 python3。本服务需要 Python 3.10 或更高版本，安装方式见 INSTALL.md 第 3.1 节。" >&2
+    fi
+    exit 1
+  fi
   VENV=.venv
-  echo "首次运行，正在创建虚拟环境（.venv）…"
-  python3 -m venv "$VENV"
+  echo "首次运行，正在创建虚拟环境（.venv，$("$PY" -V 2>&1)）…"
+  "$PY" -m venv "$VENV" || { echo "创建虚拟环境失败：$VENV" >&2; exit 1; }
 fi
+
+# 已有的 venv 可能是用 3.9 建的，再核一次，避免 uvicorn import 时抛一段栈
+"$VENV/bin/python" tools/check_python.py || exit 1
 
 if ! "$VENV/bin/python" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
   echo "正在安装依赖…"
-  "$VENV/bin/pip" install -q --upgrade pip
-  "$VENV/bin/pip" install -q fastapi "uvicorn[standard]"
+  "$VENV/bin/pip" install -q --upgrade pip || true   # 升级 pip 失败不影响安装，别让它打断首次安装
+  if ! "$VENV/bin/pip" install -q fastapi "uvicorn[standard]"; then
+    echo "依赖安装失败，多半是访问 PyPI 超时。可以换镜像重试：" >&2
+    echo "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ ./start.sh" >&2
+    exit 1
+  fi
 fi
 
 if [ ! -f data/law_data.db ]; then

@@ -18,7 +18,7 @@ if [ -z "$PY" ]; then
   if command -v python3 >/dev/null 2>&1; then
     PY=python3
   else
-    echo "未检测到 python3，请先安装 Python 3.9 以上版本。" >&2
+    echo "未检测到 python3，请先安装 Python 3.10 以上版本（见 INSTALL.md 第 3.1 节）。" >&2
     exit 1
   fi
 fi

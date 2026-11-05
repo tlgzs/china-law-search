@@ -48,6 +48,9 @@ GITHUB_API = os.environ.get(
     "LAW_GITHUB_API", "https://api.github.com/repos/{repo}/releases/latest")
 USER_AGENT = "china-law-search-fetch/1.0 (+https://github.com)"
 
+# 当前进行到哪一步。安装中途失败时，用户最需要知道的就是「卡在哪」而不是一段栈。
+_STEP = "准备"
+
 
 # ---------------------------------------------------------------- 工具函数
 
@@ -57,6 +60,11 @@ def _human(n: float) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} GB"
+
+
+def _step(name: str) -> None:
+    global _STEP
+    _STEP = name
 
 
 def _sha256(path: str) -> str:
@@ -184,9 +192,11 @@ def download(url: str, dest: str, label: str = "") -> None:
         return
     except urllib.error.HTTPError as e:
         first_err: BaseException = SystemExit(f"下载失败（HTTP {e.code}）：{url}\n{e.reason}")
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, OSError) as e:
+        # OSError 覆盖读流超时（socket.timeout）和中途断连：这类错误以前会直接抛栈。
+        reason = getattr(e, "reason", None) or e
         first_err = SystemExit(
-            f"连不上 {url}\n  {e.reason}\n"
+            f"连不上 {url}\n  {reason}\n"
             "  国内网络访问 GitHub 常被阻断，可以：\n"
             "    1) 设置代理后重试：export https_proxy=http://127.0.0.1:7890\n"
             "    2) 用浏览器手动下载 Release 附件，再执行：\n"
@@ -199,7 +209,7 @@ def download(url: str, dest: str, label: str = "") -> None:
     print(f"  {label} 常规地址不通，改用 API 资产接口重试…")
     try:
         _stream(api_url, dest, label, _asset_api_request(api_url))
-    except (urllib.error.HTTPError, urllib.error.URLError):
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         raise first_err
 
 
@@ -494,7 +504,9 @@ def main() -> int:
             raise SystemExit(f"Release 里找不到资产 {art['name']}。")
         tmp = None
         try:
+            _step("下载增量包")
             tmp = _fetch_one(art, url)
+            _step("应用增量")
             result = install_delta(tmp, db)
             print(f"\n已更新到 {result.get('to_version')}。")
             return 0
@@ -507,20 +519,30 @@ def main() -> int:
             if tmp and not args.keep and os.path.exists(tmp):
                 os.remove(tmp)
         art = _pick_full(manifest, args.prefer_gz, have)
-        url = assets.get(art["name"])
-        if not url:
-            raise SystemExit(f"Release 里找不到资产 {art['name']}，无法回落全量。")
+
+    # 全新安装（本地没有库）走不到上面的增量分支，art 一直是 None。
+    # 少了这一步，下面 os.path.splitext(art["name"]) 会抛 TypeError，
+    # 用户看到一段栈，数据一点没下。
+    if art is None:
+        art = _pick_full(manifest, args.prefer_gz, have)
+
+    url = assets.get(art["name"])
+    if not url:
+        raise SystemExit(f"Release 里找不到资产 {art['name']}，无法下载。")
 
     os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(art["name"])[1], prefix="lawfetch-")
     os.close(fd)
     try:
+        _step(f"下载 {art['name']}")
         download(url, tmp, art["name"])
+        _step("校验 sha256")
         got = _sha256(tmp)
         expect = art.get("sha256")
         if expect and got != expect:
             raise SystemExit(f"校验失败：期望 {expect[:16]}…，实际 {got[:16]}…\n文件可能损坏，请重试。")
         print("  校验通过")
+        _step("解压并安装")
         install_from_file(tmp, db, None)
     finally:
         if not args.keep and os.path.exists(tmp):
@@ -529,4 +551,16 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        print("\n已取消，本次没有改动数据。", file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001 —— 不能让用户对着栈自己猜
+        print(f"\n安装未完成：{type(e).__name__}: {e}", file=sys.stderr)
+        print(f"  卡在：{_STEP}", file=sys.stderr)
+        print("  已有的库没有被覆盖。把这段报错贴给维护者即可："
+              "https://github.com/tlgzs/china-law-search/issues", file=sys.stderr)
+        sys.exit(1)

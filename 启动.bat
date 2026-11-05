@@ -7,7 +7,7 @@ echo ======================================
 
 where python >nul 2>nul
 if errorlevel 1 (
-  echo 未检测到 Python。请先安装 Python 3.9+ 并勾选 Add to PATH。
+  echo 未检测到 Python。本服务需要 Python 3.10 或更高版本，安装时请勾选 Add to PATH。
   pause
   exit /b 1
 )
@@ -19,6 +19,13 @@ if not exist ".venv\Scripts\python.exe" if exist "venv\Scripts\python.exe" set "
 if not exist "%VENV%\Scripts\python.exe" (
   echo 首次运行，正在创建运行环境…
   python -m venv "%VENV%"
+)
+
+rem 版本不够时给可执行的提示，而不是让 uvicorn 抛一段栈
+"%VENV%\Scripts\python" tools\check_python.py
+if errorlevel 1 (
+  pause
+  exit /b 1
 )
 
 "%VENV%\Scripts\python" -c "import fastapi, uvicorn" >nul 2>nul

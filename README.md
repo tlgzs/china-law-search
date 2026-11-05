@@ -36,6 +36,11 @@
 
 下文命令写作 `python3`。Windows 上如果提示找不到该命令，换成 `python`。
 
+> **Python 版本**：下载数据、接入 agent 只用标准库，`python3` 3.9 也能跑；
+> **本地查询服务**（`server/`，FastAPI）需要 **3.10 或更高**。
+> macOS 自带的 3.9 不够启动网页服务，另建一个独立虚拟环境即可，不动系统 Python ——
+> 完整命令见 [`INSTALL.md` 3.1](INSTALL.md#31-确认本机有-python-310-以上)。
+
 ### 一、接进 agent（不需装任何依赖）
 
 ```bash
@@ -45,7 +50,8 @@ python3 tools/fetch_data.py            # 下载数据包并校验
 python3 mcp/install.py --all --yes     # 写入本机 agent 配置
 ```
 
-MCP 服务器只用 Python 标准库，不需要 `pip install` 任何东西，macOS 自带的 Python 3.9 就能跑。
+MCP 服务器只用 Python 标准库，不需要 `pip install` 任何东西，Python 3.9 就能跑。
+（本地查询服务是另一回事，要 3.10 以上，见下一节。）
 装完在 WorkBuddy 的连接器页点「信任」，Trae 和 Cursor 重启客户端即生效。
 四个工具怎么用见 [`mcp/README.md`](mcp/README.md)。
 
@@ -57,7 +63,7 @@ python3 mcp/server.py --selftest
 
 ### 二、本地查询界面
 
-要三个 Web 依赖（`fastapi`、`uvicorn`、`pydantic`）。装好数据后直接双击：
+要 **Python 3.10 以上**和三个 Web 依赖（`fastapi`、`uvicorn`、`pydantic`）。装好数据后直接双击：
 
 ```
 启动.command     # macOS
@@ -66,6 +72,9 @@ python3 mcp/server.py --selftest
 
 脚本会自己建虚拟环境、装依赖、等服务就绪再打开 `http://127.0.0.1:8001`，
 端口被占用就顺延，最远到 8010。命令行里 `./start.sh` 效果一样。
+
+首次启动前会检查 Python 版本。系统自带的 3.9 不够用时，它会给出装独立 3.12 的完整命令，
+不会抛栈，也不会去改系统 Python。项目自己建的虚拟环境在 `.venv/`，删掉它是安全的。
 
 也可以手动起：`python3 -m uvicorn server.law_search_service:app --port 8001`。
 
