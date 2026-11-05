@@ -107,6 +107,7 @@ jobs:
   guard:
     name: 版本守卫（Python 3.9 必须拒绝启动）
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -133,9 +134,16 @@ jobs:
 
       - name: start.sh 应拦截并以非 0 退出
         run: |
+          # 运行器镜像自带 Python 3.12，start.sh 的「找 3.10+ 解释器」会找到它，
+          # 于是照样建环境、起服务，这一步就永远不返回。用一个只含 3.9 的临时 PATH
+          # 把新版本藏起来，模拟普通用户机器上「只有系统 3.9」的样子。
+          bin=$(mktemp -d)
+          ln -s "$(command -v dirname)" "$bin/dirname"
+          ln -s "$(command -v python3)" "$bin/python3"
           set +e
-          out=$(./start.sh 2>&1)
+          out=$(PATH="$bin" ./start.sh 2>&1)
           code=$?
+          rm -rf "$bin"
           echo "$out"
           if [ "$code" -eq 0 ]; then
             echo "::error::3.9 下启动脚本不应继续启动服务"
