@@ -354,12 +354,16 @@ def check_g5(conn: sqlite3.Connection, today: str, catalog: str | None,
                 latest = (row.get("latest_publish_date") or "").strip()
                 if not norm:
                     continue
-                hit = conn.execute(
-                    "SELECT MAX(publish_date) FROM law_versions WHERE norm_name = ?",
-                    (norm,)).fetchone()[0]
-                if not hit:
+                # 不能拿 MAX(publish_date) 是否为空判断「有没有入库」：
+                # 库里存在公布日为空（''）的版本，MAX 会返回 ''，会被误判成未入库。
+                # 先数存在性，再在双方都有日期时比新旧。
+                count, hit = conn.execute(
+                    "SELECT COUNT(*), MAX(NULLIF(publish_date, '')) "
+                    "FROM law_versions WHERE norm_name = ?",
+                    (norm,)).fetchone()
+                if not count:
                     missing.append(norm)
-                elif latest and hit < latest:
+                elif latest and hit and hit < latest:
                     stale.append((norm, latest, hit))
         r.stats = {"catalog": catalog, "missing": len(missing), "stale": len(stale)}
     else:
