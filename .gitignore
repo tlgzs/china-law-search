@@ -4,7 +4,11 @@ data/*
 inbox/*
 !inbox/.gitkeep
 reports/
+# 过程性归档（含 agent 计划快照，单文件近 20MB），不入库
+reports-archive/
 dist/
+# 临时探针脚本（硬编码服务器路径，仅供本地排查）
+tmp_chroma_*.py
 # 原始截图存档；README 用的是 docs/images/ 下裁切压缩后的版本
 截图/
 # flk 手动批量下载的原始 docx / zip；入库走 tools/import_flk.py → inbox/，原件不入库
