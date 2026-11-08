@@ -13,6 +13,7 @@
   G5 缺收录                   应收录清单未入库；某批新增为 0 却跳过了文件
   G6 同文重复                 同名不同版本的条文哈希序列完全相同
   G7 条文切分异常             article_count=0、跳号率>5%、单条>5000 字、条号重复
+                           （跳号仅 parse_gap 阻断；source_gap 降为告警，见豁免清单）
   G8 变更未换版本号           库哈希/manifest 不符、VERSION 与 manifest 不符、corpus_version 未 bump
   G9 元数据自洽               manifest 的部数/条数与库重算不符、产物 sha256 不符
 
@@ -76,7 +77,7 @@ GATES = {
            "manifest 的部数/条数与库重算不符，或产物 sha256 与实际文件不符"),
 }
 
-_MAX_SAMPLES = 5
+_MAX_SAMPLES = 8
 
 
 @dataclass
@@ -450,23 +451,67 @@ def check_g6(conn: sqlite3.Connection, today: str) -> GateResult:
 
 _LONG_ARTICLE = 5000
 _JUMP_RATE_LIMIT = 0.05
+# 孤立高号与正常条号序列之间至少要空出这么多号，才认定为引用而非真缺。
+_ISOLATED_JUMP = 5
 
 
-def check_g7(conn: sqlite3.Connection, today: str) -> GateResult:
+def _trim_isolated_numbers(nums: list[int]) -> list[int]:
+    """剔除被正文续写或他法引用带进来的孤立高号。
+
+    例如民间借贷规定正文续行「第五十二条以及本规定第十四条之规定…」曾被切成
+    一个独立条号，把最大条号抬到 52。只从序列尾部逐个大号往回收，且仅当该号与
+    前一个条号的间距超过 _ISOLATED_JUMP 才剔除；间距正常的条号一律保留，
+    避免把「真的缺一小段」误判成引用。剔除后为空则保持原样（决定、解释类文书
+    本身没有条号序列，交给体裁判定）。
+    """
+    kept = sorted(set(nums))
+    while len(kept) > 1 and kept[-1] - kept[-2] > _ISOLATED_JUMP:
+        kept.pop()
+    return kept
+
+
+# G7 缺口豁免清单：已定性为「源文件本身缺条号」的版本清单。
+# 只降级 source_gap、排除 amendment；未登记或登记为 parse_gap 的版本照常阻断。
+_G7_REGISTRY_DEFAULT = os.path.join(_ROOT, "reports", "g7-gap-registry-20261107.csv")
+
+
+def _load_gap_registry(path: str | None) -> dict[int, dict]:
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    return {int(r["version_id"]): r for r in rows if (r.get("version_id") or "").strip()}
+
+
+def check_g7(conn: sqlite3.Connection, today: str, registry_path: str | None = None) -> GateResult:
     r = GateResult("G7")
+    registry = _load_gap_registry(registry_path)
     empty_versions = conn.execute(
         "SELECT id, law_name, publish_date, article_count FROM law_versions "
         "WHERE article_count = 0").fetchall()
     duplicate_keys = conn.execute(
         "SELECT version_id, article_number_num, COALESCE(article_suffix,'') AS suffix, "
         "COUNT(*) AS n FROM law_articles GROUP BY 1,2,3 HAVING n > 1 LIMIT 50").fetchall()
-    long_articles = conn.execute(
+    long_rows = conn.execute(
         "SELECT a.version_id, v.law_name, a.article_number, LENGTH(a.content) AS n, "
         "v.law_type FROM law_articles a JOIN law_versions v ON v.id = a.version_id "
         "WHERE LENGTH(a.content) > ? AND v.law_type != 'amendment' "
         "ORDER BY n DESC LIMIT 200", (_LONG_ARTICLE,)).fetchall()
+    long_articles = []
+    source_long_articles = []
+    for row in long_rows:
+        cause = (registry.get(row["version_id"], {}).get("root_cause") or "").strip()
+        if cause == "amendment":
+            # 修改决定整体退出超长检查（如 20347）。
+            continue
+        if cause == "source_long":
+            source_long_articles.append(row)
+        else:
+            long_articles.append(row)
 
     jumps = []
+    parse_gap_jumps = []
+    source_gap_jumps = []
     rows = conn.execute(
         "SELECT v.id, v.law_name, v.law_type, COUNT(DISTINCT a.article_number_num) AS n, "
         "MAX(a.article_number_num) AS mx FROM law_versions v "
@@ -474,21 +519,51 @@ def check_g7(conn: sqlite3.Connection, today: str) -> GateResult:
     for row in rows:
         if row["law_type"] in ("amendment", "other"):
             continue
+        info = registry.get(row["id"])
+        # 修改决定不按条号连续性判：豁免清单登记为 amendment 的版本直接退出统计。
+        if info and (info.get("root_cause") or "").strip() == "amendment":
+            continue
         maximum = row["mx"] or 0
         if maximum <= 0:
             continue
         rate = 1 - (row["n"] or 0) / maximum
         if rate > _JUMP_RATE_LIMIT:
+            # 只用本文实际条号序列：剔除正文续写/引用带来的孤立高号后重算。
+            nums = [
+                x[0] for x in conn.execute(
+                    "SELECT article_number_num FROM law_articles "
+                    "WHERE version_id = ? AND article_number_num > 0", (row["id"],))
+            ]
+            trimmed = _trim_isolated_numbers(nums)
+            if trimmed:
+                maximum = max(trimmed)
+                rate = 1 - len(set(trimmed)) / maximum
+        if rate > _JUMP_RATE_LIMIT:
             jumps.append((rate, row["law_name"], row["n"], maximum))
+            if info and (info.get("root_cause") or "").strip() == "source_gap":
+                source_gap_jumps.append((rate, row, info))
+            else:
+                parse_gap_jumps.append((rate, row, info))
     jumps.sort(reverse=True)
+    parse_gap_jumps.sort(key=lambda x: x[0], reverse=True)
+    source_gap_jumps.sort(key=lambda x: x[0], reverse=True)
 
+    source_gap_missing = sum(int(float((x[2].get("missing_numbers_total") or 0))) for x in source_gap_jumps)
+    registry_rel = os.path.relpath(registry_path or _G7_REGISTRY_DEFAULT, _ROOT)
     r.stats = {
         "empty_versions": len(empty_versions),
         "duplicate_article_keys": len(duplicate_keys),
         "long_articles": len(long_articles),
+        "source_long_advisory": len(source_long_articles),
+        "source_long_versions": len({row["version_id"] for row in source_long_articles}),
         "long_article_threshold": _LONG_ARTICLE,
         "jump_rate_violations": len(jumps),
         "jump_rate_limit": _JUMP_RATE_LIMIT,
+        "parse_gap_blocking": len(parse_gap_jumps),
+        "source_gap_advisory": len(source_gap_jumps),
+        "source_gap_missing_numbers": source_gap_missing,
+        "gap_registry_entries": len(registry),
+        "gap_registry": registry_rel,
     }
     for row in empty_versions[:3]:
         r.sample(f"0 条版本：{row['law_name']}（{row['publish_date'] or '无日期'}）")
@@ -496,12 +571,27 @@ def check_g7(conn: sqlite3.Connection, today: str) -> GateResult:
         r.sample(f"条号重复：version {row['version_id']} 第 {row['article_number_num']} 条 × {row['n']}")
     for row in long_articles[:3]:
         r.sample(f"超长条文：{row['law_name']} {row['article_number']} = {row['n']} 字")
-    for rate, law, n, mx in jumps[:3]:
-        r.sample(f"跳号率 {rate:.1%}：{law}（{n}/{mx} 条）")
+    for row in source_long_articles[:3]:
+        r.sample(f"源侧超长（source_long）：{row['law_name']} {row['article_number']} = {row['n']} 字，保留整条不拆")
+    for rate, row, info in parse_gap_jumps[:3]:
+        r.sample(f"跳号率 {rate:.1%}（parse_gap）：{row['law_name']}（{row['n']}/{row['mx']} 条）")
+    for rate, row, info in source_gap_jumps[:3]:
+        r.sample(
+            f"源缺号（source_gap）：version {row['id']} {row['law_name']} "
+            f"缺 {info.get('missing_ranges') or info.get('missing_numbers_total')}；"
+            f"源文件 {os.path.basename(info.get('source_file') or '')}，"
+            f"文件内条号 {info.get('src_min')}–{info.get('src_max')}")
 
-    blocking = bool(empty_versions or duplicate_keys or long_articles or jumps)
-    if blocking:
+    structural = bool(empty_versions or duplicate_keys or long_articles)
+    if structural or parse_gap_jumps:
         r.fail(GATES["G7"][3])
+    elif source_gap_jumps or source_long_articles:
+        parts = []
+        if source_gap_jumps:
+            parts.append(f"{len(source_gap_jumps)} 个版本源文件缺条号（source_gap）")
+        if source_long_articles:
+            parts.append(f"{len(source_long_articles)} 条源文件本身超长（source_long）")
+        r.warn("，".join(parts) + f" 不阻断；明细见 {registry_rel}")
     return r
 
 
@@ -648,7 +738,8 @@ def check_g9(conn: sqlite3.Connection, today: str, manifest_path: str | None,
 
 def run(db_path: str, manifest_path: str | None, version_file: str | None,
         artifacts_dir: str | None, plans_dir: str | None, catalog: str | None,
-        previous_manifest: str | None, today: str, only: list[str] | None) -> list[GateResult]:
+        previous_manifest: str | None, today: str, only: list[str] | None,
+        g7_registry: str | None = None) -> list[GateResult]:
     conn = _connect(db_path)
     _require_tables(conn, ["law_articles", "law_versions", "corpus_meta"])
     selected = [g for g in GATES if not only or g in only]
@@ -667,7 +758,7 @@ def run(db_path: str, manifest_path: str | None, version_file: str | None,
         elif gate == "G6":
             results.append(check_g6(conn, today))
         elif gate == "G7":
-            results.append(check_g7(conn, today))
+            results.append(check_g7(conn, today, g7_registry))
         elif gate == "G8":
             results.append(check_g8(conn, today, db_path, manifest_path, version_file, previous_manifest))
         elif gate == "G9":
@@ -723,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifacts-dir", default=os.path.join(_ROOT, "dist"))
     parser.add_argument("--plans-dir", default=os.path.join(_ROOT, "reports"))
     parser.add_argument("--catalog", default=None, help="应收录清单 CSV（norm_name,latest_publish_date）")
+    parser.add_argument("--g7-registry", default=_G7_REGISTRY_DEFAULT,
+                        help="G7 缺口豁免清单 CSV（source_gap 降告警、amendment 退出统计）")
     parser.add_argument("--previous-manifest", default=None, help="上一版 manifest，用于判断是否 bump")
     parser.add_argument("--today", default=_today_default())
     parser.add_argument("--only", default=None, help="只跑指定门禁，逗号分隔，如 G1,G2,G4")
@@ -743,7 +836,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         results = run(args.db, args.manifest, args.version_file, args.artifacts_dir,
-                      args.plans_dir, args.catalog, args.previous_manifest, args.today, only)
+                      args.plans_dir, args.catalog, args.previous_manifest, args.today, only,
+                      args.g7_registry)
     except sqlite3.OperationalError as exc:
         print(f"读库失败：{exc}", file=sys.stderr)
         return 2
