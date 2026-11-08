@@ -34,8 +34,10 @@ sys.path.insert(0, _HERE)
 from diff_articles import build_plan, render_html  # noqa: E402
 from schema import (  # noqa: E402
     STATUS_PENDING,
+    bigram_ready,
     create_fts,
     ensure_schema,
+    index_bigram_articles,
     initial_status,
     meta_get,
     meta_set,
@@ -194,6 +196,7 @@ def apply_plan(db_path: str, plan_path: str, approve: bool, vectors: bool, force
                  (batch_id, now_iso(), plan_path))
     added_laws = updated_laws = added_articles = changed_articles = removed_articles = 0
     touched: list[str] = []
+    version_ids: list[int] = []
 
     with conn:  # 单事务：任何一步失败全部回滚
         for law in plan["laws"]:
@@ -201,6 +204,7 @@ def apply_plan(db_path: str, plan_path: str, approve: bool, vectors: bool, force
             if law["action"] in ("skip", "stale"):
                 continue
             version_id = insert_new_version(conn, law, batch_id)
+            version_ids.append(version_id)
             if law["action"] == "new":
                 added_laws += 1
             else:
@@ -222,6 +226,14 @@ def apply_plan(db_path: str, plan_path: str, approve: bool, vectors: bool, force
              changed_articles, removed_articles, batch_id),
         )
         create_fts(conn)
+        # 二字倒排索引只增量追加，不重扫全库：入库后不登记新条文，
+        # 2 字查询就会漏掉这次新增的内容（索引比库旧 = 静默漏检）。
+        if version_ids and bigram_ready(conn):
+            placeholders = ",".join("?" for _ in version_ids)
+            new_ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM law_articles WHERE version_id IN ({placeholders})",
+                version_ids)]
+            index_bigram_articles(conn, new_ids)
         version = bump_corpus_version(conn)
 
         # data_cutoff / snapshot_date 原来只有 apply_delta 会写，本地入库这条路上

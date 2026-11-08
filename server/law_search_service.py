@@ -515,6 +515,9 @@ async def search_laws(
     k: int = Query(default=10, ge=1, le=50),
     type: str | None = Query(default=None),
     include_history: bool = Query(default=False, description="是否包含已被修订的旧版本条文"),
+    law_level: str | None = Query(default=None, description="层级：national/province/city"),
+    province: str | None = Query(default=None, description="省级行政区，如 广东省"),
+    city: str | None = Query(default=None, description="市/自治州，如 沈阳市"),
     client_id: str = Depends(verify_token),
 ):
     """向量语义检索法条。ChromaDB 不可用时降级为 SQLite FTS 全文搜索。"""
@@ -531,7 +534,8 @@ async def search_laws(
             logger.warning("ChromaDB search failed, falling back to SQLite: %s", e)
 
     if not items and engine != "chromadb":
-        items = _search_via_sqlite(q, k, type, include_history)
+        items = _search_via_sqlite(q, k, type, include_history,
+                                   law_level=law_level, province=province, city=city)
 
     # 含历史结果时，现行有效条文一律排在已失效条文之前（stable，不打乱相关性顺序）
     if include_history:
@@ -603,9 +607,11 @@ def _search_via_chromadb(q: str, k: int, law_type: str | None,
 
 
 def _search_via_sqlite(q: str, k: int, law_type: str | None,
-                       include_history: bool = False) -> list[dict]:
+                       include_history: bool = False, law_level: str | None = None,
+                       province: str | None = None, city: str | None = None) -> list[dict]:
     """SQLite 三级检索 — 实现见 server/law_query_core.py:LawStore.search。"""
-    return _store().search(q, k=k, law_type=law_type, include_history=include_history)
+    return _store().search(q, k=k, law_type=law_type, include_history=include_history,
+                           law_level=law_level, province=province, city=city)
 
 # ============================================================
 # API: 精确条号查找
@@ -618,10 +624,36 @@ async def get_law_article(
     article_suffix: str | None = Query(
         default=None, description="增补条后缀，如「之一」（刑法第一百三十三条之一）"),
     include_history: bool = Query(default=False, description="是否返回已被修订的旧版本条文"),
+    as_of: str | None = Query(
+        default=None,
+        description="按时间点取条文，格式 YYYY-MM-DD。不传则取现行版（与旧行为一致）。"),
     client_id: str = Depends(verify_token),
 ):
     """根据法律名称和条号获取法条正文。支持模糊匹配法律名称。"""
     start = time.time()
+    if as_of:
+        # 版本选择逻辑只在 law_query_core 里实现一份，HTTP 侧直接复用，
+        # 避免「网页按现行版、接口按时间点」两套判据各写一遍而走岔。
+        item = _store().get_article(law_name, article_num, article_suffix or "",
+                                    include_history=include_history, as_of=as_of)
+        elapsed_ms = int((time.time() - start) * 1000)
+        if not item:
+            log_call(client_id=client_id, endpoint="/api/law/article",
+                     query=f"{law_name}#{article_num}@{as_of}",
+                     result_count=0, elapsed_ms=elapsed_ms)
+            return {"error": "not_found", "law_name": law_name,
+                    "article_num": article_num, "as_of": as_of}
+        if item.get("error"):
+            log_call(client_id=client_id, endpoint="/api/law/article",
+                     query=f"{law_name}#{article_num}@{as_of}",
+                     result_count=0, elapsed_ms=elapsed_ms)
+            return item
+        item.setdefault("is_pending", item.get("status") == "pending")
+        item.setdefault("is_repealed", item.get("status") == "repealed")
+        log_call(client_id=client_id, endpoint="/api/law/article",
+                 query=f"{law_name}#{article_num}@{as_of}",
+                 result_count=1, elapsed_ms=elapsed_ms)
+        return item
     normalized_name = normalize_law_name(law_name)
     original_name = law_name.strip()
     history_filter = "" if include_history else " AND (status IS NULL OR status != 'repealed')"
@@ -748,6 +780,24 @@ async def get_law_article(
     logger.info("Found: law_name=%s, article=%s, content_length=%d",
                 row["law_name"], row["article_number"], len(row["content"] or ""))
     return result
+
+
+@app.get("/api/law/versions")
+async def get_law_versions(
+    law_name: str = Query(..., min_length=1),
+    client_id: str = Depends(verify_token),
+):
+    """列出某部法规的全部版本及各自有效区间（施行日 → 下一版施行日前一天）。"""
+    versions = _store().list_versions(law_name)
+    if not versions:
+        return {"error": "not_found", "law_name": law_name,
+                "message": "未找到该法规的版本记录，法名可能有出入。"}
+    return {
+        "law_name": versions[0]["law_name"],
+        "version_count": len(versions),
+        "versions": versions,
+    }
+
 
 
 # ============================================================

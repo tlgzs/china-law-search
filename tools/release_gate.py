@@ -16,6 +16,8 @@
                            （跳号仅 parse_gap 阻断；source_gap 降为告警，见豁免清单）
   G8 变更未换版本号           库哈希/manifest 不符、VERSION 与 manifest 不符、corpus_version 未 bump
   G9 元数据自洽               manifest 的部数/条数与库重算不符、产物 sha256 不符
+  G10 发布资产完整性          全量包（zst/gz）与增量包（json/gz/zst）缺失、
+                           或变更账本未更新到本次 corpus_version —— 全量与增量必须一起发
 
 用法：
   python tools/release_gate.py --db data/law_data.db --manifest dist/manifest.json
@@ -75,6 +77,9 @@ GATES = {
            "库文件与 manifest 不一致：改了库没重新打包，或 corpus_version 未 bump，或 VERSION 与 manifest.app_version 不一致"),
     "G9": ("元数据自洽", BLOCKING, "打包后 / 发布前校验",
            "manifest 的部数/条数与库重算不符，或产物 sha256 与实际文件不符"),
+    "G10": ("发布资产完整性", BLOCKING, "打包后 / 发布前校验",
+            "发布资产不完整：全量包（zst/gz）或增量包（json/gz/zst）缺失，"
+            "或变更账本未更新到本次 corpus_version —— 全量与增量必须一起发，缺一不发"),
 }
 
 _MAX_SAMPLES = 8
@@ -194,7 +199,10 @@ def check_g3(conn: sqlite3.Connection, today: str) -> GateResult:
     rows = conn.execute(
         "SELECT id, norm_name, law_name, publish_date, effective_date, status, "
         "superseded_at FROM law_versions "
-        "ORDER BY norm_name, COALESCE(publish_date, ''), id").fetchall()
+        # 公布日缺失或两版公布日相同时，按施行日期回退排序：不能凭空的公布日判定先后，
+        # 也不能让空串把新版排到旧版前面（网络安全审查办法 24104、渔业捕捞 24872 曾因此误报倒挂）。
+        "ORDER BY norm_name, COALESCE(NULLIF(publish_date, ''), effective_date, ''), "
+        "COALESCE(effective_date, ''), id").fetchall()
 
     by_law: dict[str, list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
@@ -262,8 +270,11 @@ _FIELD_CODE_PATTERNS = [
     ("TOC", re.compile(r"\bTOC\s+\\o")),
 ]
 _FIELD_CODE_HINT = re.compile(r"MERGEFORMAT|HYPERLINK|SHAPE|EMBED|PAGE|MERGEFIELD|TOC")
-_TAIL_CTA_BLOCK = ("扫一扫", "手机阅读", "责任编辑", "扫描二维码", "关注公众号")
-_TAIL_CTA_WARN = ("二维码",)
+# 「责任编辑」是常见法律术语（责任编辑制度、责任编辑注册），不是页尾 CTA：
+# 仅凭关键词命中会把《邮票发行监督管理办法》等正常条文判成残渣（实测 26 条误报），
+# 因此只做告警，真正页尾由 _RESIDUE_TAIL_RE 与跨语料重复尾行规则兜底。
+_TAIL_CTA_BLOCK = ("扫一扫", "手机阅读", "扫描二维码", "关注公众号")
+_TAIL_CTA_WARN = ("二维码", "责任编辑")
 _TAIL_LIMIT = 200
 _REPEAT_TAIL_MIN_LAWS = 10
 # 跨语料重复尾行不能只看「重复 ≥10 部」：实测按该口径命中 1,184 行，其中
@@ -486,9 +497,14 @@ def _load_gap_registry(path: str | None) -> dict[int, dict]:
 def check_g7(conn: sqlite3.Connection, today: str, registry_path: str | None = None) -> GateResult:
     r = GateResult("G7")
     registry = _load_gap_registry(registry_path)
-    empty_versions = conn.execute(
-        "SELECT id, law_name, publish_date, article_count FROM law_versions "
-        "WHERE article_count = 0").fetchall()
+    # 0 条版本若已在豁免清单登记为 amendment（决定类文书，源文为一、二、…条目，
+    # 本就没有第X条结构），不按结构性缺陷阻断；正文确实切不出来的仍会照旧拦下。
+    empty_versions = [
+        row for row in conn.execute(
+            "SELECT id, law_name, publish_date, article_count FROM law_versions "
+            "WHERE article_count = 0").fetchall()
+        if (registry.get(row["id"], {}).get("root_cause") or "").strip() != "amendment"
+    ]
     duplicate_keys = conn.execute(
         "SELECT version_id, article_number_num, COALESCE(article_suffix,'') AS suffix, "
         "COUNT(*) AS n FROM law_articles GROUP BY 1,2,3 HAVING n > 1 LIMIT 50").fetchall()
@@ -733,13 +749,125 @@ def check_g9(conn: sqlite3.Connection, today: str, manifest_path: str | None,
 
 
 # ============================================================
+# G10 发布资产完整性
+# ============================================================
+
+LEDGER_PATH = os.path.join(_ROOT, "state", "change-ledger.json")
+
+
+def _find_artifact(name: str, dirs: list[str]) -> str | None:
+    """在多个目录里找第一个存在且非空的同名文件。
+
+    打包后门禁运行时，新产物还在 dist/.release-staging-* 里，而原始 delta json
+    在 dist/ 根目录；只看单一目录会把「刚生成但还没落正式路径」误判成缺失。
+    """
+    for d in dirs:
+        if not d:
+            continue
+        path = os.path.join(d, name)
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+    return None
+
+
+def _cmd_make_release(cv: str) -> str:
+    return (f"python3 tools/make_release.py --db data/law_data.db "
+            f"--delta dist/delta-{cv}.json --out-dir dist/")
+
+
+def _cmd_make_delta(cv: str) -> str:
+    return (f"python3 tools/make_delta.py --db data/law_data.db "
+            f"--plan <本轮 plan.json> --out dist/delta-{cv}.json")
+
+
+def check_g10(conn: sqlite3.Connection, artifacts_dirs: list[str]) -> GateResult:
+    """全量包与增量包必须成对存在，且账本已并入本次版本。
+
+    这条门禁是为了拦住「只发全量」：漏传增量不会让任何检查报错，但所有老用户
+    都会被推去下几百 MB 的全量包；反过来漏传全量，新用户直接装不上。账本没并
+    是最隐蔽的一种——delta 能生成，体积也正常，只是内容缺了整轮变更。
+    """
+    r = GateResult("G10")
+    cv = ""
+    for key, value in conn.execute("SELECT key, value FROM corpus_meta").fetchall():
+        if key == "corpus_version":
+            cv = value or ""
+
+    stats = {
+        "corpus_version": cv,
+        "dirs": [os.path.abspath(d) for d in artifacts_dirs if d],
+    }
+    problems: list[str] = []
+
+    if not cv:
+        problems.append(
+            "库里没有 corpus_version，无法定位本次要发的资产文件名。"
+            "修复：先确认 data/law_data.db 的 corpus_meta.corpus_version 已设置")
+    else:
+        full_pairs = [
+            (f"law_data-{cv}.db.zst", "全量包 zst",
+             "缺少主包，绝大多数用户会退化到更大的 gz"),
+            (f"law_data-{cv}.db.gz", "全量包 gz",
+             "用户机器既无 zstandard 库也无 zstd 命令时只能退回 gz，缺了这类用户装不上"),
+        ]
+        for name, label, why in full_pairs:
+            if not _find_artifact(name, artifacts_dirs):
+                problems.append(
+                    f"{label}缺失：dist/{name} 不存在或为空（{why}）。"
+                    f"修复：{_cmd_make_release(cv)}")
+
+        if not _find_artifact(f"delta-{cv}.json", artifacts_dirs):
+            problems.append(
+                f"增量包缺失：dist/delta-{cv}.json 不存在（全量与增量必须一起发，缺一不发）。"
+                f"修复：先把本轮 plan 并入账本再出包 —— {_cmd_make_delta(cv)}")
+
+        for suffix in (".gz", ".zst"):
+            name = f"delta-{cv}.json{suffix}"
+            if not _find_artifact(name, artifacts_dirs):
+                problems.append(
+                    f"增量包压缩变体缺失：dist/{name}（zst 与 gz 两种格式都要发）。"
+                    f"修复：{_cmd_make_release(cv)}")
+
+    if not os.path.exists(LEDGER_PATH):
+        problems.append(
+            f"变更账本不存在：{LEDGER_PATH}。修复：{_cmd_make_delta(cv)}")
+    else:
+        try:
+            with open(LEDGER_PATH, encoding="utf-8") as f:
+                ledger = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            ledger = {}
+            problems.append(f"变更账本读取失败：{LEDGER_PATH}（{exc}）")
+
+        ledger_version = (ledger.get("corpus_version") or "").strip()
+        stats["ledger_corpus_version"] = ledger_version or "(缺字段)"
+        stats["ledger_laws"] = len(ledger.get("laws") or {})
+        if not ledger_version:
+            problems.append(
+                "变更账本缺 corpus_version 字段，无法确认它已并入本次版本。"
+                f"修复：{_cmd_make_delta(cv)}（make_delta 写回时会带上目标版本）")
+        elif ledger_version != cv:
+            problems.append(
+                f"变更账本未更新到本次版本：账本 {ledger_version} / 库 {cv}。"
+                f"修复：把本轮 plan 并入账本后重跑 —— {_cmd_make_delta(cv)}")
+
+    r.stats = stats
+    for p in problems:
+        r.sample(p)
+    if problems:
+        r.fail(GATES["G10"][3])
+    return r
+
+
+# ============================================================
 # 主流程
 # ============================================================
 
 def run(db_path: str, manifest_path: str | None, version_file: str | None,
         artifacts_dir: str | None, plans_dir: str | None, catalog: str | None,
         previous_manifest: str | None, today: str, only: list[str] | None,
-        g7_registry: str | None = None) -> list[GateResult]:
+        g7_registry: str | None = None,
+        extra_artifacts_dirs: list[str] | None = None) -> list[GateResult]:
     conn = _connect(db_path)
     _require_tables(conn, ["law_articles", "law_versions", "corpus_meta"])
     selected = [g for g in GATES if not only or g in only]
@@ -763,6 +891,8 @@ def run(db_path: str, manifest_path: str | None, version_file: str | None,
             results.append(check_g8(conn, today, db_path, manifest_path, version_file, previous_manifest))
         elif gate == "G9":
             results.append(check_g9(conn, today, manifest_path, artifacts_dir))
+        elif gate == "G10":
+            results.append(check_g10(conn, [artifacts_dir] + list(extra_artifacts_dirs or [])))
     conn.close()
     return results
 

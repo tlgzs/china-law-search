@@ -281,6 +281,9 @@ def row_to_item(r, score: float = 0.0) -> dict:
         "law_name": r["law_name"],
         "law_type": r["law_type"],
         "law_type_label": r["law_type_label"],
+        "law_level": (r["law_level"] if "law_level" in r.keys() else "") or "",
+        "law_province": (r["law_province"] if "law_province" in r.keys() else "") or "",
+        "law_city": (r["law_city"] if "law_city" in r.keys() else "") or "",
         "article_number": r["article_number"],
         "article_num": r["article_number_num"],
         "article_suffix": r["article_suffix"] or "",
@@ -301,7 +304,57 @@ def row_to_item(r, score: float = 0.0) -> dict:
 
 _COLS = """a.law_name, a.law_type, a.law_type_label, a.article_number,
            a.article_number_num, a.article_suffix, a.chapter, a.section, a.content,
-           a.publish_date, a.effective_date, a.status, a.repeal_date, a.replaced_by"""
+           a.publish_date, a.effective_date, a.status, a.repeal_date, a.replaced_by,
+           a.law_level, a.law_province, a.law_city"""
+
+
+# ============================================================
+# 二字倒排索引读取（写入与构建在 ingest/schema.py）
+# ============================================================
+
+_BIGRAM_META_KEY = "bigram_index_version"
+_BIGRAM_INDEX_VERSION = "1"
+
+
+def _decode_ids(blob: bytes):
+    """增量 varint → 条文 id。与 ingest/schema.py 的 _encode_ids 互逆。"""
+    num = 0
+    shift = 0
+    total = 0
+    for b in blob:
+        num |= (b & 0x7F) << shift
+        if b & 0x80:
+            shift += 7
+        else:
+            total += num
+            yield total
+            num = 0
+            shift = 0
+
+
+def _merge_sorted(left, right):
+    a = next(left, None)
+    b = next(right, None)
+    while a is not None or b is not None:
+        if b is None or (a is not None and a <= b):
+            yield a
+            a = next(left, None)
+        else:
+            yield b
+            b = next(right, None)
+
+
+def bigram_query_ok(q: str) -> bool:
+    """只有「恰好 2 个字」、且不含 LIKE 通配符与 ASCII 字母的查询才走倒排。
+
+    LIKE 对 ASCII 字母大小写不敏感，倒排索引区分大小写；含 % 或 _ 时 LIKE 的
+    语义也不一样。这几种情况一律退回原来的 LIKE，保证结果集不变。
+    """
+    if len(q) != 2:
+        return False
+    if "%" in q or "_" in q:
+        return False
+    return not re.search(r"[A-Za-z]", q)
 
 
 def fts_query(q: str) -> str | None:
@@ -410,6 +463,8 @@ class LawStore:
 
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        # 二字索引是否可用，第一次查表后缓存；库在会话中途变化也不重查
+        self._bigram_flag: bool | None = None
 
     # ---------- 内部工具 ----------
 
@@ -437,6 +492,52 @@ class LawStore:
             return " AND article_suffix = ?", (article_suffix,)
         return " AND (article_suffix = '' OR article_suffix IS NULL)", ()
 
+    # ---------- 二字倒排索引 ----------
+
+    def _bigram_ready(self) -> bool:
+        """索引存在且版本标记对得上才用；否则退回 LIKE（宁可慢，不能漏）。"""
+        if self._bigram_flag is None:
+            ok = False
+            if self._has_table("law_bigram_index"):
+                try:
+                    row = self.conn.execute(
+                        "SELECT value FROM corpus_meta WHERE key = ?",
+                        (_BIGRAM_META_KEY,)).fetchone()
+                    ok = bool(row) and str(row[0]) == _BIGRAM_INDEX_VERSION
+                except Exception:  # noqa: BLE001
+                    ok = False
+            self._bigram_flag = ok
+        return self._bigram_flag
+
+    def _iter_bigram_ids(self, gram: str):
+        """按 id 升序产出含该二字组的条文 id。
+
+        主索引是打包时写死的 postings，增量包只追加到 law_bigram_add，
+        所以两路必须归并，不能只读其中一路——否则更新过的库会漏掉新条文。
+        """
+        row = self.conn.execute(
+            "SELECT postings FROM law_bigram_index WHERE gram = ?", (gram,)).fetchone()
+        main = _decode_ids(row[0]) if row and row[0] else iter(())
+        extra = iter(())
+        if self._has_table("law_bigram_add"):
+            extra = (r[0] for r in self.conn.execute(
+                "SELECT article_id FROM law_bigram_add WHERE gram = ? ORDER BY article_id",
+                (gram,)))
+        return _merge_sorted(main, extra)
+
+    def _lookup_by_ids(self, ids: list[int], q: str, filters: str, params: list,
+                       limit: int) -> list:
+        """按 id 批查，谓词与原 LIKE 完全相同，保证结果集与修前逐条一致。"""
+        placeholders = ",".join("?" for _ in ids)
+        return self.conn.execute(
+            f"""SELECT {_COLS} FROM law_articles a
+                WHERE a.id IN ({placeholders})
+                  AND (a.content LIKE ? OR a.article LIKE ?){filters}
+                ORDER BY a.id
+                LIMIT ?""",
+            (*ids, f"%{q}%", f"%{q}%", *params, limit),
+        ).fetchall()
+
     # ---------- 单条定位 ----------
 
     def get_article(
@@ -445,8 +546,15 @@ class LawStore:
         article_num: int,
         article_suffix: str = "",
         include_history: bool = False,
+        as_of: str | None = None,
     ) -> dict | None:
-        """法名 + 条号 → 条文。精确匹配优先，其次模糊匹配（排除司法解释误命中）。"""
+        """法名 + 条号 → 条文。精确匹配优先，其次模糊匹配（排除司法解释误命中）。
+
+        `as_of`（YYYY-MM-DD）一传，就按「那一天正在施行的版本」取。
+        不传则与旧行为完全一致：取现行版，其次已公布未生效版。
+        """
+        if as_of:
+            return self._get_article_as_of(law_name, article_num, article_suffix, as_of)
         normalized_name = normalize_law_name(law_name)
         original_name = (law_name or "").strip()
         history_filter = self._history_clause(include_history, "law_articles")
@@ -488,6 +596,10 @@ class LawStore:
         if not row:
             return None
 
+        return self._article_item(row)
+
+    @staticmethod
+    def _article_item(row) -> dict:
         return {
             "law_name": row["law_name"],
             "law_type": row["law_type"],
@@ -508,6 +620,102 @@ class LawStore:
             "is_principle_clause": bool(row["is_principle_clause"]),
             "source_file": row["source_file"],
         }
+
+    def list_versions(self, law_name: str) -> list[dict]:
+        """该法在库里的版本清单，按施行日升序，附各自的有效区间。
+
+        区间右端点是**下一版的施行日（不含）**：新版当天生效，旧版当天即失效，
+        所以「2019-06-01 这天适用哪版」用 `effective_date <= as_of < in_force_until` 判定。
+        """
+        resolved = self.resolve_law_name(law_name, include_history=True)
+        name = resolved.get("law_name") or (law_name or "").strip()
+        rows = list(self.conn.execute(
+            """SELECT id, law_name, publish_date, effective_date, status, article_count
+               FROM law_versions
+               WHERE law_name = ?
+               ORDER BY COALESCE(effective_date, publish_date, '') ASC, id ASC""",
+            (name,),
+        ).fetchall())
+        if not rows and name != (law_name or "").strip():
+            # 归一化名对不上时退回模糊，避免用户少写书名号就查不到版本区间
+            rows = list(self.conn.execute(
+                """SELECT id, law_name, publish_date, effective_date, status, article_count
+                   FROM law_versions
+                   WHERE law_name LIKE ?
+                   ORDER BY COALESCE(effective_date, publish_date, '') ASC, id ASC LIMIT 20""",
+                (f"%{normalize_law_name(law_name)}%",),
+            ).fetchall())
+
+        out: list[dict] = []
+        for i, r in enumerate(rows):
+            start = r["effective_date"] or r["publish_date"] or ""
+            nxt = rows[i + 1] if i + 1 < len(rows) else None
+            until = (nxt["effective_date"] or nxt["publish_date"] or "") if nxt else ""
+            out.append({
+                "version_id": r["id"],
+                "law_name": r["law_name"],
+                "publish_date": r["publish_date"] or "",
+                "effective_date": start,
+                "in_force_until": until,   # 空 = 暂无下一版（一直是最后一版）
+                "status": r["status"] or "",
+                "article_count": r["article_count"] or 0,
+            })
+        return out
+
+    def _get_article_as_of(self, law_name: str, article_num: int,
+                           article_suffix: str, as_of: str) -> dict | None:
+        """按时间点取条文：办旧案子要引当年施行的版本，不能拿最新版套。
+
+        找不到覆盖该日期的版本时**不返回 None**，而是返回带 error 与版本区间的
+        结构化结果 —— 让调用方能直接告诉用户「这部法 2019 年还没有施行」，
+        而不是含糊地报「查不到条文」。
+        """
+        day = (as_of or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return {"error": "invalid_as_of", "as_of": day,
+                    "message": "as_of 需为 YYYY-MM-DD 格式的日期。", "available_versions": []}
+
+        versions = self.list_versions(law_name)
+        if not versions:
+            return None
+
+        covered = [v for v in versions if v["effective_date"] and v["effective_date"] <= day]
+        if not covered:
+            return {
+                "error": "no_version_in_force",
+                "law_name": versions[0]["law_name"],
+                "as_of": day,
+                "message": f"该法规在 {day} 尚无施行版本（最早版本施行于 "
+                           f"{versions[0]['effective_date'] or '未知日期'}）。",
+                "available_versions": versions,
+            }
+
+        chosen = covered[-1]
+        suffix_filter, suffix_args = self._suffix_clause(article_suffix)
+        row = self.conn.execute(
+            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
+                      article_suffix, chapter, section, article, content, publish_date,
+                      effective_date, status, repeal_date, repeal_reason, replaced_by,
+                      is_principle_clause, source_file
+               FROM law_articles
+               WHERE version_id = ? AND article_number_num = ?{suffix_filter}
+               LIMIT 1""",
+            (chosen["version_id"], article_num, *suffix_args),
+        ).fetchone()
+        if not row:
+            return {
+                "error": "article_not_in_version",
+                "law_name": chosen["law_name"],
+                "as_of": day,
+                "message": f"该版本（施行于 {chosen['effective_date']}）没有第 {article_num} 条。",
+                "available_versions": versions,
+            }
+
+        item = self._article_item(row)
+        item["as_of"] = day
+        item["version_id"] = chosen["version_id"]
+        item["version_effective_date"] = chosen["effective_date"]
+        return item
 
     def resolve_law_name(self, law_name: str, include_history: bool = True) -> dict:
         """把用户输入的法名解析到库里的规范名称。
@@ -668,11 +876,17 @@ class LawStore:
         law_type: str | None = None,
         include_history: bool = False,
         law_name: str | None = None,
+        law_level: str | None = None,
+        province: str | None = None,
+        city: str | None = None,
     ) -> list[dict]:
-        """三级检索：FTS5(trigram+bm25) → LIKE → 2 字片段多数命中。
+        """三级检索：FTS5(trigram+bm25) → 二字倒排 → LIKE → 2 字片段多数命中。
 
         第三级是为中文准备的：用户写「二倍工资」而原文是「二倍的工资」时，
         字面连续匹配必然落空，只能拆片段换召回。precision 让一点，换可用性。
+
+        `law_level`（national/province/city）、`province`、`city` 来自名称前缀推导，
+        用于「只查某省/某市的法规」；字段为空的历史数据不会被这些过滤命中。
         """
         q = (q or "").strip()
         if not q:
@@ -686,12 +900,25 @@ class LawStore:
         if law_name:
             filters += " AND a.law_name LIKE ?"
             params.append(f"%{normalize_law_name(law_name)}%")
+        if law_level:
+            filters += " AND a.law_level = ?"
+            params.append(law_level)
+        if province:
+            filters += " AND a.law_province = ?"
+            params.append(province)
+        if city:
+            filters += " AND a.law_city = ?"
+            params.append(city)
         if not include_history:
             filters += " AND (a.status IS NULL OR a.status != 'repealed')"
 
         # 1) FTS5
         fts = fts_query(q)
         if fts:
+            # include_history=False 时先多取 3 倍候选：同一部法新旧两版并存时，
+            # 新版（pending）按 bm25 也可能排进前 k，把现行版整条挤出结果。
+            # 取宽一点再在内存里滤掉 pending、截回 k，排序与 dedupe 规则不变。
+            fetch_k = k if include_history else k * 3
             try:
                 rows = self.conn.execute(
                     f"""SELECT {_COLS}, bm25(law_articles_fts) AS rank
@@ -700,18 +927,45 @@ class LawStore:
                         WHERE law_articles_fts MATCH ?{filters}
                         ORDER BY rank
                         LIMIT ?""",
-                    (fts, *params, k),
+                    (fts, *params, fetch_k),
                 ).fetchall()
                 if rows:
                     # bm25 越小越相关，转成正向 0~1 分数便于展示
-                    return dedupe_versions(
-                        [row_to_item(r, round(1.0 / (1.0 + abs(r["rank"])), 4)) for r in rows]
-                    )
+                    items = [row_to_item(r, round(1.0 / (1.0 + abs(r["rank"])), 4)) for r in rows]
+                    if not include_history:
+                        current = [it for it in items if not it.get("is_pending")]
+                        # 命中的全是「已公布未生效」的新规时退回原结果，别让检索变空
+                        items = current or items
+                    return dedupe_versions(items)[:k]
             except Exception:  # noqa: BLE001
                 # FTS 表缺失或语法异常时静默降级，不让检索整体失败
                 pass
 
-        # 2) LIKE 兜底
+        # 2) 二字查询走倒排索引：trigram 只切 3 字窗口，2 字走 LIKE 是全表扫描
+        #    （实测 2.8–10.8 秒）。倒排按 id 升序返回，落库仍用原 LIKE 谓词复核，
+        #    所以结果数量与顺序跟修前逐条一致，不是"只查精确匹配"。
+        if bigram_query_ok(q) and self._bigram_ready():
+            found: list = []
+            batch: list[int] = []
+            for aid in self._iter_bigram_ids(q):
+                batch.append(aid)
+                if len(batch) >= 200:
+                    rest = k - len(found)
+                    if rest > 0:
+                        found.extend(self._lookup_by_ids(batch, q, filters, params, rest))
+                    batch = []
+                    if len(found) >= k:
+                        break
+            rest = k - len(found)
+            if batch and rest > 0:
+                found.extend(self._lookup_by_ids(batch, q, filters, params, rest))
+            if found:
+                return dedupe_versions([row_to_item(r) for r in found])
+            # 索引是全量的：候选为空就等于没有命中（含被过滤器筛空的情况），
+            # 再退回 LIKE 只会把"查不到"从毫秒拖成数秒（实测 2.4–3.2 秒）。
+            return []
+
+        # 3) LIKE 兜底
         rows = self.conn.execute(
             f"""SELECT {_COLS}
                 FROM law_articles a
@@ -722,7 +976,7 @@ class LawStore:
         if rows:
             return dedupe_versions([row_to_item(r) for r in rows])
 
-        # 3) 片段兜底
+        # 4) 片段兜底
         terms = match_terms(q)
         if terms:
             n = len(terms)
@@ -749,6 +1003,9 @@ class LawStore:
         k: int = 10,
         law_type: str | None = None,
         include_history: bool = False,
+        law_level: str | None = None,
+        province: str | None = None,
+        city: str | None = None,
     ) -> list[dict]:
         """多关键词检索。AND 要求全部命中，OR 命中任意一个。
 
@@ -763,6 +1020,15 @@ class LawStore:
         if law_type:
             filters += " AND a.law_type = ?"
             params.append(law_type)
+        if law_level:
+            filters += " AND a.law_level = ?"
+            params.append(law_level)
+        if province:
+            filters += " AND a.law_province = ?"
+            params.append(province)
+        if city:
+            filters += " AND a.law_city = ?"
+            params.append(city)
         if not include_history:
             filters += " AND (a.status IS NULL OR a.status != 'repealed')"
 

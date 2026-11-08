@@ -140,8 +140,30 @@ TOOLS = [
                     "description": "为 true 时允许返回已被修订的旧条文。默认 false，只取现行。",
                     "default": False,
                 },
+                "as_of": {
+                    "type": "string",
+                    "description": (
+                        "按时间点取条文，格式 YYYY-MM-DD。办旧案子时传案发/裁判时点，"
+                        "取那一天正在施行的版本；不传则与原先一致，取现行版。"
+                        "该日无施行版本时返回错误并列出全部版本区间。"
+                    ),
+                },
             },
             "required": ["law_name", "article_number"],
+        },
+    },
+    {
+        "name": "get_law_versions",
+        "description": (
+            "列出某部法规在库里的全部版本与各自的有效区间（施行日 → 下一版施行日前一天）。"
+            "用于确认某案发时点应当适用哪一版，或核对版本沿革是否完整。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "law_name": {"type": "string", "description": "法律名称，可省略书名号，如「行政复议法」。"},
+            },
+            "required": ["law_name"],
         },
     },
     {
@@ -208,6 +230,19 @@ TOOLS = [
                 "law_type": {
                     "type": "string",
                     "description": "限定法规类别，可选值见 stats 的 by_law_type 键。",
+                },
+                "law_level": {
+                    "type": "string",
+                    "enum": ["national", "province", "city"],
+                    "description": "限定层级：国家 / 省级 / 设区的市。",
+                },
+                "province": {
+                    "type": "string",
+                    "description": "限定省级行政区，如「广东省」「内蒙古自治区」。",
+                },
+                "city": {
+                    "type": "string",
+                    "description": "限定市/自治州，如「沈阳市」「延边朝鲜族自治州」。",
                 },
                 "include_history": {
                     "type": "boolean",
@@ -338,8 +373,16 @@ class LawMcpServer:
 
         suffix = str(args.get("article_suffix") or "").strip() or parse_article_suffix(str(raw))
         include_history = bool(args.get("include_history", False))
+        as_of = str(args.get("as_of") or "").strip() or None
 
-        item = self.store().get_article(law_name, num, suffix, include_history=include_history)
+        item = self.store().get_article(law_name, num, suffix,
+                                        include_history=include_history, as_of=as_of)
+        if item and item.get("error"):
+            return _err(item.get("message") or "该时间点无法取到条文",
+                        error=item.get("error"),
+                        as_of=item.get("as_of"),
+                        available_versions=item.get("available_versions", []),
+                        hint="不传 as_of 可取现行版；或按 available_versions 里的区间换一个日期。")
         if not item:
             suggestions = self.store().list_laws(law_name, k=5)
             return _err(
@@ -359,6 +402,26 @@ class LawMcpServer:
                 "该条文已公布但尚未生效，不得作为现行有效依据引用"
             )
         return _ok({"article": item, "data_snapshot": self.snapshot()})
+
+    def tool_get_law_versions(self, args: dict) -> dict:
+        law_name = str(args.get("law_name") or "").strip()
+        if not law_name:
+            return _err("缺少参数 law_name")
+        versions = self.store().list_versions(law_name)
+        if not versions:
+            suggestions = self.store().list_laws(law_name, k=5)
+            return _err(
+                "未找到该法规的版本记录",
+                law_name=law_name,
+                law_name_candidates=[s["law_name"] for s in suggestions],
+                hint="法名可能有出入；可先用 get_law 确认正式名称。",
+            )
+        return _ok({
+            "law_name": versions[0]["law_name"],
+            "version_count": len(versions),
+            "versions": versions,
+            "data_snapshot": self.snapshot(),
+        })
 
     def tool_get_law(self, args: dict) -> dict:
         law_name = str(args.get("law_name") or "").strip()
@@ -402,16 +465,17 @@ class LawMcpServer:
         mode = str(args.get("mode") or "AND").upper()
         law_type = args.get("law_type")
         include_history = bool(args.get("include_history", False))
+        geo = {k: (args.get(k) or None) for k in ("law_level", "province", "city")}
 
         store = self.store()
         items = store.search_multi(
-            keywords, mode=mode, k=k, law_type=law_type, include_history=include_history
+            keywords, mode=mode, k=k, law_type=law_type, include_history=include_history, **geo
         )
         # AND 无结果时用 OR 再兜一次，并明确告知放宽了条件——比让 agent 自己重试更省调用
         relaxed = False
         if not items and mode == "AND" and len(keywords) > 1:
             items = store.search_multi(
-                keywords, mode="OR", k=k, law_type=law_type, include_history=include_history
+                keywords, mode="OR", k=k, law_type=law_type, include_history=include_history, **geo
             )
             relaxed = bool(items)
 
@@ -481,6 +545,7 @@ class LawMcpServer:
             handlers = {
                 "get_article": self.tool_get_article,
                 "get_law": self.tool_get_law,
+                "get_law_versions": self.tool_get_law_versions,
                 "search_articles": self.tool_search_articles,
                 "verify_citation": self.tool_verify_citation,
             }
