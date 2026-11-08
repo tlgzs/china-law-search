@@ -203,6 +203,61 @@ def parse_filename(filename: str, dir_label: str = "") -> dict:
 # 匹配法条行: "第一条" / "第1条" / "第六百八十条"
 _ARTICLE_PATTERN = re.compile(r"^第([零〇一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟0-9]+)条\s*")
 
+_ARTICLE_NUM_CHARS = "零〇一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟0-9"
+
+# 强调标记的连续长度会变（*、**、*** 都出现过），统一按 1–4 个匹配。
+_EMPHASIS_RUN = r"(?:\*{1,4}|_{1,4})"
+
+# 条号带 markdown 标记：**第一条** / __第一条__ / [第一条]{.smallcaps}
+# pandoc 与部分地方站导出的正文把条号包在强调或 smallcaps 里，不剥掉标记
+# 行首就不是「第」字，整部法会被粘进上一条。
+_ARTICLE_MARKUP_PATTERNS = [
+    re.compile(r"^(?:\*\*|__)(第[" + _ARTICLE_NUM_CHARS + r"]+条)(?:\*\*|__)"),
+    re.compile(r"^\[(第[" + _ARTICLE_NUM_CHARS + r"]+条)\]\{[^}]*\}"),
+    # 整段被 smallcaps 包裹：「[第十一条 正文…]{.smallcaps}」，右中括号不在条号后。
+    # 括号内可能还套着空强调标记（「[**　** 第二条]{.smallcaps}」）。
+    # 贪婪匹配到最后一个「]{…}」，避免正文里的方括号把条文截断；组 1 含条号与正文。
+    re.compile(
+        r"^\[(?:[\s\u3000]*" + _EMPHASIS_RUN + r")*[\s\u3000]*"
+        r"(第[" + _ARTICLE_NUM_CHARS + r"]+条.*)\]\{[^}]*\}"
+    ),
+    # 条号做 markdown 锚点链接：「[第二十六条](#_Toc15055) 正文」
+    re.compile(r"^\[(第[" + _ARTICLE_NUM_CHARS + r"]+条)\](?:\([^)]*\))"),
+    # 空加粗/斜体标记：「**　**第二条　正文」「***　***　第二十六条」「**第一条　**正文」。
+    # 开标记后可跟任意多组空标记，条号后允许空白再跟闭标记。
+    re.compile(
+        r"^" + _EMPHASIS_RUN + r"(?:[\s\u3000]*" + _EMPHASIS_RUN + r")*"
+        r"[\s\u3000]*(第[" + _ARTICLE_NUM_CHARS + r"]+条)(?:[\s\u3000]*" + _EMPHASIS_RUN + r")?"
+    ),
+    # 条号被写成标题：「## 第一条 为了…」「###  第三条 本条例…」，标题级别不影响切条。
+    re.compile(r"^#{1,6}\s*(第[" + _ARTICLE_NUM_CHARS + r"]+条)"),
+    # 空括号占位符：「（） 第十条 …」
+    re.compile(r"^（\s*）[\s\u3000]*(第[" + _ARTICLE_NUM_CHARS + r"]+条)"),
+    # Word 转出的目录超链接残留：HYPERLINK \l _Toc12361 第四条 正文
+    # 大小写混用，且存在 HYPERLINK "url" \o "…" 第一条 的形态，统一取行内首个条号。
+    re.compile(r"^HYPERLINK\s+(?:.*?)(第[" + _ARTICLE_NUM_CHARS + r"]+条)"),
+]
+
+# Word 符号字体常把项目符号渲染成私有区字符（U+E000–U+F8FF），行首残留会挡住条号。
+_PRIVATE_USE_PREFIX = re.compile(r"^[\ue000-\uf8ff]+\s*")
+
+# 同一行里「。第X条　」把两条粘在一起：在条号前补一个换行，后续走正常切分。
+# 句号与条号之间可能还夹着全角空格或 Word 私有区符号（「。\ue004　第四条」），一并吃掉。
+# 要求条号后紧跟空白，避免把「。第五条规定」这类正文引用误切成新条。
+_INLINE_ARTICLE_BOUNDARY = re.compile(
+    r"(?<=[。\ue004])[\ue004\s\u3000]*(第[" + _ARTICLE_NUM_CHARS + r"]+条)(?=[\s\u3000])"
+)
+
+
+def _strip_article_markup(line: str) -> str:
+    """去掉行首条号的 markdown 标记，返回可被 _ARTICLE_PATTERN 识别的文本。"""
+    line = _PRIVATE_USE_PREFIX.sub("", line, count=1)
+    for pattern in _ARTICLE_MARKUP_PATTERNS:
+        new = pattern.sub(r"\1", line, count=1)
+        if new != line:
+            return new
+    return line
+
 # 匹配章标题: "## 第一章" / "第一章 总则" (纯文本也支持)
 # 必须不包含"条"字,避免误匹配法条引用
 _CHAPTER_PATTERN = re.compile(r"^#{0,4}\s*(第[零〇一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟0-9]+[编章部分])\s*(.*)")
@@ -303,14 +358,21 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
     # 2. 读取文件内容
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            text = f.read()
     except UnicodeDecodeError:
         try:
             with open(filepath, "r", encoding="gbk") as f:
-                lines = f.readlines()
+                text = f.read()
         except Exception as e:
             result.parse_errors.append(f"文件编码错误: {e}")
             return result
+
+    # U+2028/U+2029 是行分隔符而不是普通字符：不先还原成换行，整段正文
+    # 会被当成一行，行首的「第X条」全部漏切。
+    text = text.replace("\u2028", "\n").replace("\u2029", "\n")
+    # 同一行里「。第X条　」粘住的下一条，先断成独立行，后续走正常切分。
+    text = _INLINE_ARTICLE_BOUNDARY.sub(r"\n\1", text)
+    lines = text.split("\n")
 
     # 3. 解析文件内容
     current_chapter = ""
@@ -330,9 +392,18 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
         if not stripped:
             continue
 
-        # 跳过引用块 (> 开头, 通常是颁布信息)
+        # 引用块（>）只在文件头代表颁布信息，跳过；正文开始后的引用行属于
+        # 条文内容，整行跳过会让正文缺字。整部法都被引用块包住时，第一条也必须能切出来。
         if stripped.startswith(">"):
-            continue
+            quoted = _strip_article_markup(stripped.lstrip(">").strip())
+            if not found_first_content and not _ARTICLE_PATTERN.match(quoted):
+                continue
+            stripped = quoted
+            if not stripped:
+                continue
+
+        # 剥掉条号的 markdown 标记，**第一条** / [第一条]{.smallcaps} 才能被识别
+        stripped = _strip_article_markup(stripped)
 
         # 跳过 YAML front matter (--- ... ---)
         if stripped == "---":
@@ -405,9 +476,8 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
             # 处理全角空格和制表符
             content = content.replace("\u3000", "").replace("\t", "").strip()
 
-            # 如果正文为空,可能法条内容在下一行
-            if not content:
-                continue
+            # 条号单独成行（正文在下一行）时也要建条，否则后续正文会被
+            # 追加到上一条，整部法粘成一条。最终清空无正文的空条。
 
             # 如果法规名称为空, 尝试从内容推断
             if not result.law_name and not found_first_content:
@@ -448,6 +518,9 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
     # 清理法条正文 (去除多余空行)
     for article in result.articles:
         article.content = re.sub(r"\n{3,}", "\n\n", article.content).strip()
+
+    # 只有条号、始终没有正文的空条（目录里的条号行）不计为法条
+    result.articles = [a for a in result.articles if a.content]
 
     result.article_count = len(result.articles)
     return result

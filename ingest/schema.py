@@ -17,9 +17,14 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+import time
+from array import array
 from datetime import datetime, timezone
+from typing import Iterator
 
-SCHEMA_VERSION = 3
+# 5：law_versions 新增 order_no/source_url/source_gap（部门规章、地方政府规章入库）。
+# 均为可空列，老客户端按列名查询，不读这三列也能正常工作，属于向后兼容的加列。
+SCHEMA_VERSION = 5
 
 # 法规/条文时效状态：
 #   effective  现行有效
@@ -100,6 +105,9 @@ CREATE TABLE IF NOT EXISTS law_articles (
     repeal_reason TEXT,
     replaced_by TEXT,
     is_principle_clause INTEGER DEFAULT 0,
+    law_level TEXT,
+    law_province TEXT,
+    law_city TEXT,
     source_file TEXT NOT NULL
 );
 """
@@ -121,7 +129,13 @@ CREATE TABLE IF NOT EXISTS law_versions (
     superseded_by INTEGER,
     superseded_at TEXT,
     batch_id TEXT,
-    created_at TEXT
+    created_at TEXT,
+    law_level TEXT,
+    law_province TEXT,
+    law_city TEXT,
+    order_no TEXT,
+    source_url TEXT,
+    source_gap TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_versions_norm ON law_versions(norm_name, publish_date);
@@ -154,6 +168,24 @@ CREATE TABLE IF NOT EXISTS corpus_meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- 二字（bigram）倒排索引：FTS5 trigram 索引只切 3 字窗口，2 字查询无法命中，
+-- 只能退回 LIKE 全表扫描（实测 2.8–10.8 秒）。这里把每部条文出现过的
+-- 二字片段预先建成 posting 列表，2 字查询降为毫秒级，且结果集与 LIKE 完全一致。
+-- postings 是升序条文的增量 varint 编码，一个词一行；比 (gram, aid) 明细表小一个数量级。
+CREATE TABLE IF NOT EXISTS law_bigram_index (
+    gram TEXT PRIMARY KEY,
+    n INTEGER NOT NULL,
+    postings BLOB NOT NULL
+) WITHOUT ROWID;
+
+-- 增量包新入库的条文只写这张小表，2 字查询时与上面的主索引归并；
+-- 下次全量重建时并入主索引并清空。避免每次增量都重扫 100 万条正文。
+CREATE TABLE IF NOT EXISTS law_bigram_add (
+    gram TEXT NOT NULL,
+    article_id INTEGER NOT NULL,
+    PRIMARY KEY (gram, article_id)
+) WITHOUT ROWID;
 """
 
 
@@ -262,10 +294,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "repeal_reason": "TEXT",
         "replaced_by": "TEXT",
         "is_principle_clause": "INTEGER DEFAULT 0",
+        "law_level": "TEXT",
+        "law_province": "TEXT",
+        "law_city": "TEXT",
     }
     for column, ddl in additions.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE law_articles ADD COLUMN {column} {ddl}")
+
+    # law_versions 也要补同样的三列：层级是「版本」的属性，条文列是为了检索过滤
+    # 不必再 JOIN 版本表。两处同名列由入库路径同时写入，口径一致。
+    existing_versions = _columns(conn, "law_versions")
+    for column in ("law_level", "law_province", "law_city"):
+        if column not in existing_versions:
+            conn.execute(f"ALTER TABLE law_versions ADD COLUMN {column} TEXT")
+    # 规章入库新增：令号、原文 URL、源侧缺条标记。老库就地补列，不改已有数据。
+    for column in ("order_no", "source_url", "source_gap"):
+        if column not in existing_versions:
+            conn.execute(f"ALTER TABLE law_versions ADD COLUMN {column} TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_versions_level ON law_versions(law_level)"
+    )
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_articles_version ON law_articles(version_id)"
@@ -281,6 +330,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_articles_law_num "
         "ON law_articles(law_name, article_number_num)"
+    )
+    # 向量增量重建按 source_file 逐版本定位条文（ingest/rebuild_vectors_by_version.py
+    # 与 fmzy 的 rebuild_vectors_incremental.py）。缺这条索引时每个版本要扫 100 万行、
+    # 约 37 秒，9298 个版本相当于数十小时；补上后按文件定位是毫秒级。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_articles_source_file "
+        "ON law_articles(source_file)"
     )
     # 必须用 upsert：INSERT OR IGNORE 在老库上不会更新已存在的键，
     # 结果就是代码升到 schema 3 了、库里还写着 2，靠 schema_version 做的判断全部失效。
@@ -358,3 +414,146 @@ def latest_version(conn: sqlite3.Connection, norm_name: str) -> sqlite3.Row | No
         "ORDER BY COALESCE(publish_date, '') DESC, id DESC LIMIT 1",
         (norm_name,),
     ).fetchone()
+
+
+# ============================================================
+# 二字倒排索引（FTS5 trigram 的 2 字补丁）
+# ============================================================
+
+BIGRAM_META_KEY = "bigram_index_version"
+BIGRAM_INDEX_VERSION = 1
+_BIGRAM_BATCH = 2000
+
+
+def _encode_ids(ids) -> bytes:
+    """升序条文 id → 增量 varint。相邻 id 差值通常是个位数，平均不到 1 字节/条。"""
+    out = bytearray()
+    prev = 0
+    for i in ids:
+        d = i - prev
+        prev = i
+        while d > 127:
+            out.append((d & 0x7F) | 0x80)
+            d >>= 7
+        out.append(d)
+    return bytes(out)
+
+
+def _decode_ids(blob: bytes) -> Iterator[int]:
+    num = 0
+    shift = 0
+    total = 0
+    for b in blob:
+        num |= (b & 0x7F) << shift
+        if b & 0x80:
+            shift += 7
+        else:
+            total += num
+            yield total
+            num = 0
+            shift = 0
+
+
+def _merge_sorted(left: Iterator[int], right: Iterator[int]) -> Iterator[int]:
+    a = next(left, None)
+    b = next(right, None)
+    while a is not None or b is not None:
+        if b is None or (a is not None and a <= b):
+            yield a
+            a = next(left, None)
+        else:
+            yield b
+            b = next(right, None)
+
+
+def _text_grams(text: str, article: str | None = None) -> set[str]:
+    """把一段正文的全部二字片段收进集合。
+
+    不过滤标点与换行：查询可能是任意 2 个字，索引漏了就会和 LIKE 结果对不上。
+    """
+    grams: set[str] = set()
+    for i in range(len(text) - 1):
+        grams.add(text[i:i + 2])
+    if article and article != text:
+        for i in range(len(article) - 1):
+            grams.add(article[i:i + 2])
+    return grams
+
+
+def rebuild_bigram_index(conn: sqlite3.Connection) -> dict:
+    """全量重建二字索引（约 1~3 分钟，+110 MB）。
+
+    只在两种时机调用：全量建库之后、发版打包之前。增量包走 law_bigram_add，
+    不重扫全库 —— 否则用户每次更新都要等三分钟。
+    """
+    started = time.time()
+    conn.execute("DELETE FROM law_bigram_index")
+    conn.execute("DELETE FROM law_bigram_add")
+
+    buckets: dict[str, array] = {}
+    rows = 0
+    for aid, content, article in conn.execute(
+            "SELECT id, content, article FROM law_articles ORDER BY id"):
+        rows += 1
+        for g in _text_grams(content or "", article):
+            bucket = buckets.get(g)
+            if bucket is None:
+                buckets[g] = array("I", [aid])
+            else:
+                bucket.append(aid)
+
+    items = [(g, len(ids), _encode_ids(ids)) for g, ids in buckets.items()]
+    for i in range(0, len(items), _BIGRAM_BATCH):
+        conn.executemany(
+            "INSERT OR REPLACE INTO law_bigram_index(gram, n, postings) VALUES (?,?,?)",
+            items[i:i + _BIGRAM_BATCH],
+        )
+
+    meta_set(conn, BIGRAM_META_KEY, str(BIGRAM_INDEX_VERSION))
+    conn.commit()
+    total_postings = sum(b[1] for b in items)
+    return {
+        "rows": rows,
+        "grams": len(items),
+        "postings": total_postings,
+        "seconds": round(time.time() - started, 1),
+    }
+
+
+def bigram_ready(conn: sqlite3.Connection) -> bool:
+    """索引存在且版本对得上才敢用，否则退回 LIKE（宁可慢，不能漏）。"""
+    try:
+        return meta_get(conn, BIGRAM_META_KEY, "") == str(BIGRAM_INDEX_VERSION)
+    except sqlite3.OperationalError:
+        return False
+
+
+def index_bigram_articles(conn: sqlite3.Connection, article_ids) -> int:
+    """增量入库后只登记新增条文的二字片段，供 2 字查询与主索引归并。"""
+    ids = list(dict.fromkeys(int(x) for x in article_ids))
+    if not ids:
+        return 0
+    written = 0
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        records: list[tuple[str, int]] = []
+        for aid, content, article in conn.execute(
+                f"SELECT id, content, article FROM law_articles WHERE id IN ({marks})", chunk):
+            for g in _text_grams(content or "", article):
+                records.append((g, aid))
+        if records:
+            conn.executemany(
+                "INSERT OR IGNORE INTO law_bigram_add(gram, article_id) VALUES (?,?)", records)
+            written += len(records)
+    return written
+
+
+def iter_bigram_article_ids(conn: sqlite3.Connection, gram: str) -> Iterator[int]:
+    """按条文 id 升序产出含该二字片段的条文，主索引与增量登记表归并。"""
+    row = conn.execute(
+        "SELECT postings FROM law_bigram_index WHERE gram = ?", (gram,)).fetchone()
+    base = _decode_ids(row[0]) if row and row[0] else iter(())
+    added = [r[0] for r in conn.execute(
+        "SELECT article_id FROM law_bigram_add WHERE gram = ? ORDER BY article_id", (gram,))]
+    return _merge_sorted(base, iter(added))

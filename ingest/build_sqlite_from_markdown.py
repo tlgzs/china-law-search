@@ -29,6 +29,7 @@ from schema import (  # noqa: E402
     file_sha256,
     norm_law_name,
     now_iso,
+    rebuild_bigram_index,
     split_suffix,
     bump_corpus_version,
 )
@@ -214,6 +215,9 @@ def build(markdown_dir: str, output: str, keep_history: bool, replace: bool) -> 
         (now_iso(), sum(len(f) for f in by_law.values()), total_laws, total_articles, batch_id),
     )
     create_fts(conn)
+    # 全量建库是二字索引唯一的重建时机：FTS5 trigram 只切 3 字窗口，
+    # 2 字查询没有这本倒排就只能全表 LIKE（实测 2.8–3.9 秒）。
+    bigram_stats = rebuild_bigram_index(conn)
     version = bump_corpus_version(conn)
     stats = conn.execute("SELECT COUNT(*) FROM law_articles").fetchone()[0]
     laws = conn.execute("SELECT COUNT(DISTINCT norm_name) FROM law_versions").fetchone()[0]
@@ -223,6 +227,7 @@ def build(markdown_dir: str, output: str, keep_history: bool, replace: bool) -> 
         "corpus_version": version,
         "laws": laws,
         "articles": stats,
+        "bigram": bigram_stats,
         "skipped_versions": skipped_versions,
         "multi_files": multi_files,
         "output": output,
@@ -243,6 +248,8 @@ def main() -> None:
     print(f"完成：{info['output']}")
     print(f"  corpus_version = {info['corpus_version']}")
     print(f"  法规 {info['laws']} 部，法条 {info['articles']} 条")
+    big = info["bigram"]
+    print(f"  二字索引 {big['grams']} 个词、{big['postings']} 条 posting，耗时 {big['seconds']} 秒")
     if info["multi_files"]:
         print(f"  有 {info['multi_files']} 部法规存在多份文件（历史版本或重复转换件）")
     if info["skipped_versions"]:
