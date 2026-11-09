@@ -19,6 +19,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -192,6 +193,32 @@ def compress(src: str, out_dir: str) -> list[str]:
     return outs
 
 
+def _prune_old_artifacts(out_dir: str, current: str, previous: str | None) -> None:
+    """只保留 当前版本 + 上一版 + 命名锚点，其余数据包从 dist/ 删除。
+
+    manifest.json 永不删；锚点写在 <out_dir>/.keep-versions（一行一个版本号，# 开头为注释）。
+    只处理本脚本自己产出的两类文件名，不碰目录里的其他文件。
+    """
+    keep = {current}
+    if previous:
+        keep.add(previous)
+    keep_file = os.path.join(out_dir, ".keep-versions")
+    if os.path.exists(keep_file):
+        with open(keep_file, encoding="utf-8") as f:
+            keep.update(line.strip() for line in f if line.strip() and not line.startswith("#"))
+
+    pattern = re.compile(r"^(law_data|delta)-(.+)\.(?:db|json)(?:\.(?:gz|zst))?$")
+    for name in sorted(os.listdir(out_dir)):
+        matched = pattern.match(name)
+        if not matched or matched.group(2) in keep:
+            continue
+        path = os.path.join(out_dir, name)
+        if os.path.isfile(path):
+            size = os.path.getsize(path)
+            os.remove(path)
+            print(f"  清理旧资产 {name}  {size / 1048576:.1f} MB")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="打包发版资产")
     ap.add_argument("--db", default="./data/law_data.db")
@@ -325,7 +352,17 @@ def main() -> None:
         for item in artifacts:
             os.replace(os.path.join(staging, item["name"]),
                        os.path.join(args.out_dir, item["name"]))
+        previous_version = None
+        if os.path.exists(previous_manifest):
+            try:
+                with open(previous_manifest, encoding="utf-8") as f:
+                    previous_version = json.load(f).get("corpus_version")
+            except (OSError, json.JSONDecodeError):
+                previous_version = None
         os.replace(manifest_path, os.path.join(args.out_dir, "manifest.json"))
+        # 资产与 manifest 都已就位，再按保留策略清旧包；留在 dist/ 的只有
+        # 当前版、上一版和 .keep-versions 里点名的锚点。
+        _prune_old_artifacts(args.out_dir, version, previous_version)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
