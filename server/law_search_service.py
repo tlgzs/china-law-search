@@ -17,32 +17,18 @@ ChromaDB 向量语义检索 + SQLite 精确查找，双库互补，向量库不�
   GET  /api/law/stats                          库统计信息
   GET  /health                                 健康检查（免认证）
 
-认证（可选，默认开启）:
-  - 每渠道独立 Bearer Token，配置于 api_keys.json（格式见 README）
-  - LAW_API_ENFORCE=0 可临时切回软认证（带 token 记来源，不带 token 放行记 unknown）
-  - /health 始终免认证（监控用）
-
-渠道分级:
-  - tier=private（默认）：不限流
-  - tier=public：按 IP 限流（rate_limit_per_min + rate_limit_per_day），超过 429+Retry-After
-
-统计:
-  - 每次调用追加一条 JSONL 至 call_log.jsonl
-  - 字段：ts, client_id, endpoint, query, result_count, elapsed_ms, status, ip, ua
+认证：不在本项目范围。本服务默认不校验任何凭据，如需公网暴露，
+      请自行前置反向代理或网关做认证与限流。
 
 环境变量（均可选）:
   LAW_DB_PATH          SQLite 路径          默认 <项目>/data/law_data.db
   LAW_CHROMA_PATH      ChromaDB 路径        默认 <项目>/data/legal_vector_db
   LAW_COLLECTION_NAME  Chroma 集合名        默认 chinese_laws
   LAW_EMBEDDING_MODEL  Embedding 模型       默认 BAAI/bge-large-zh-v1.5
-  LAW_API_KEYS_FILE    API Key 配置         默认 <项目>/data/api_keys.json
-  LAW_CALL_LOG_PATH    调用日志             默认 <项目>/data/call_log.jsonl
-  LAW_API_ENFORCE      强制认证             默认 1
   LAW_PORT             监听端口             默认 8001
 """
 
 import datetime
-import json
 import logging
 import math
 import os
@@ -50,7 +36,6 @@ import re
 import sqlite3
 import sys
 import time
-from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +43,7 @@ from typing import Any
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel
@@ -135,193 +120,6 @@ DB_PATH = os.environ.get("LAW_DB_PATH", str(_DATA_DIR / "law_data.db"))
 CHROMA_PATH = os.environ.get("LAW_CHROMA_PATH", str(_DATA_DIR / "legal_vector_db"))
 COLLECTION_NAME = os.environ.get("LAW_COLLECTION_NAME", "chinese_laws")
 EMBEDDING_MODEL = os.environ.get("LAW_EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
-
-# 认证与统计
-API_KEYS_FILE = os.environ.get("LAW_API_KEYS_FILE", str(_DATA_DIR / "api_keys.json"))
-CALL_LOG_PATH = os.environ.get("LAW_CALL_LOG_PATH", str(_DATA_DIR / "call_log.jsonl"))
-# 强制模式：1=无 token/错 token → 401；0=软认证（仅记来源，不挡）
-API_ENFORCE = os.environ.get("LAW_API_ENFORCE", "0") not in ("0", "false", "False", "")
-
-
-# ============================================================
-# API Key 加载与校验
-# ============================================================
-
-def load_api_keys() -> dict[str, dict]:
-    """读取配置，反转为 {token: meta} 映射。
-
-    两种格式兼容：
-      A) {"client_id": "raw_token_string"}      → private tier，不限流
-      B) {"client_id": {"token": "...",        → 完整 meta
-                        "tier": "public"|"private",
-                        "rate_limit_per_min": int,
-                        "rate_limit_per_day": int}}
-
-    返回 meta: {client_id, tier, rate_limit_per_min, rate_limit_per_day}
-    """
-    out: dict[str, dict] = {}
-    try:
-        with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.warning("Failed to load API keys from %s: %s", API_KEYS_FILE, e)
-        return out
-
-    for client_id, value in data.items():
-        # 跳过以 _ 开头的元数据字段（如 _comment）
-        if client_id.startswith("_"):
-            continue
-        if isinstance(value, str) and value:
-            # 旧格式：client_id → raw token，默认 private
-            out[value] = {
-                "client_id": client_id,
-                "tier": "private",
-                "rate_limit_per_min": 0,
-                "rate_limit_per_day": 0,
-            }
-        elif isinstance(value, dict):
-            tok = value.get("token", "")
-            if isinstance(tok, str) and tok:
-                out[tok] = {
-                    "client_id": client_id,
-                    "tier": value.get("tier", "private"),
-                    "rate_limit_per_min": int(value.get("rate_limit_per_min", 0)),
-                    "rate_limit_per_day": int(value.get("rate_limit_per_day", 0)),
-                }
-    return out
-
-
-# ============================================================
-# 按 IP 限流（tier=public 才生效）
-# ============================================================
-
-# {ip: deque[float]} — 滑动窗口时间戳
-_rate_window_min: dict[str, deque] = defaultdict(deque)
-_rate_window_day: dict[str, deque] = defaultdict(deque)
-
-
-def _check_rate_limit(ip: str, per_min: int, per_day: int) -> tuple[bool, int]:
-    """返回 (是否通过, retry_after_seconds)。
-
-    - per_min=0 且 per_day=0 → 无限流
-    - 超过窗口 → 不通过，retry_after=窗口剩余时间
-    - 通过则同时记入两个窗口
-    """
-    if per_min <= 0 and per_day <= 0:
-        return True, 0
-    now = time.time()
-    # 清过期
-    wmin = _rate_window_min[ip]
-    wday = _rate_window_day[ip]
-    while wmin and now - wmin[0] > 60:
-        wmin.popleft()
-    while wday and now - wday[0] > 86400:
-        wday.popleft()
-    # 命中限流
-    if per_min and len(wmin) >= per_min:
-        return False, max(1, int(60 - (now - wmin[0])))
-    if per_day and len(wday) >= per_day:
-        return False, max(1, int(86400 - (now - wday[0])))
-    # 通过 + 记入
-    wmin.append(now)
-    wday.append(now)
-    return True, 0
-
-
-# 兼容旧用法：保留 API_KEYS 反向索引（client_id → token 集合）
-API_KEYS: dict[str, dict] = load_api_keys()
-
-# 开了强制认证却没有可用 token → 谁也进不来（本地自用场景常见）。
-# 这里自动降级为软认证，日志里明确提示，避免装完就打不开。
-if API_ENFORCE and not API_KEYS:
-    logger.warning(
-        "LAW_API_ENFORCE=1 但未读到任何 token（%s 不存在或为空）→ 自动降级为免认证模式",
-        API_KEYS_FILE,
-    )
-    API_ENFORCE = False
-
-logger.info(
-    "API keys loaded: %d client(s)=%s; enforce=%s",
-    len(API_KEYS),
-    sorted({m["client_id"] for m in API_KEYS.values()}),
-    API_ENFORCE,
-)
-PUBLIC_CLIENTS = [m["client_id"] for m in API_KEYS.values() if m["tier"] == "public"]
-if PUBLIC_CLIENTS:
-    logger.info("Public-tier clients (IP rate limited): %s", PUBLIC_CLIENTS)
-
-
-def _extract_bearer(authorization: str | None) -> str:
-    if not authorization:
-        return ""
-    s = authorization.strip()
-    return s[7:] if s.lower().startswith("bearer ") else ""
-
-
-def verify_token(
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> str:
-    """FastAPI 依赖：从 Authorization 头校验 token，返回 client_id。
-
-    - 强制模式：未带/带错 token → 401
-    - 软认证模式（LAW_API_ENFORCE=0）：未带 token → "unknown"；带错 token → 401
-    - tier=public 的 client 命中 IP 限流 → 429 + Retry-After
-    """
-    token = _extract_bearer(authorization)
-    if token and token in API_KEYS:
-        meta = API_KEYS[token]
-        # 公开 tier 走 IP 限流
-        if meta["tier"] == "public":
-            ip = request.client.host if request.client else "unknown"
-            ok, retry = _check_rate_limit(
-                ip, meta["rate_limit_per_min"], meta["rate_limit_per_day"]
-            )
-            if not ok:
-                logger.info(
-                    "Rate-limited: client=%s ip=%s retry_after=%ds",
-                    meta["client_id"], ip, retry,
-                )
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"调用频次超限（每 IP {meta['rate_limit_per_min']}/min, "
-                           f"{meta['rate_limit_per_day']}/day），请 {retry}s 后重试",
-                    headers={"Retry-After": str(retry)},
-                )
-        return meta["client_id"]
-
-    if API_ENFORCE or token:
-        # 强制模式，或软认证下带了错 token（避免错 token 被静默放过）
-        raise HTTPException(status_code=401, detail="缺少或无效的 API Token")
-    # 软认证 + 未带 token
-    return "unknown"
-
-
-def log_call(
-    *,
-    client_id: str,
-    endpoint: str,
-    query: Any,
-    result_count: int,
-    elapsed_ms: int,
-    status: int = 200,
-) -> None:
-    """追加一条结构化调用日志（JSONL）。失败仅记录 warning，不抛异常。"""
-    entry = {
-        "ts": datetime.datetime.utcnow().isoformat() + "Z",
-        "client_id": client_id,
-        "endpoint": endpoint,
-        "query": (str(query)[:200] if query is not None else ""),
-        "result_count": int(result_count),
-        "elapsed_ms": int(elapsed_ms),
-        "status": int(status),
-        "ip": "",  # 由 uvicorn access log 记录，此处不重复
-    }
-    try:
-        with open(CALL_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        logger.warning("Failed to write call log: %s", e)
 
 
 # ============================================================
@@ -448,9 +246,6 @@ async def health():
     result: dict[str, Any] = {
         "status": "ok",
         "version": APP_VERSION,
-        "api_enforce": API_ENFORCE,
-        "clients": sorted({m["client_id"] for m in API_KEYS.values()}),
-        "public_clients": PUBLIC_CLIENTS,
     }
 
     # SQLite 状态（count=含历史版本，effective=现行有效，pending=已公布未生效）
@@ -518,7 +313,6 @@ async def search_laws(
     law_level: str | None = Query(default=None, description="层级：national/province/city"),
     province: str | None = Query(default=None, description="省级行政区，如 广东省"),
     city: str | None = Query(default=None, description="市/自治州，如 沈阳市"),
-    client_id: str = Depends(verify_token),
 ):
     """向量语义检索法条。ChromaDB 不可用时降级为 SQLite FTS 全文搜索。"""
     start = time.time()
@@ -542,13 +336,6 @@ async def search_laws(
         items.sort(key=lambda x: x.get("is_repealed", False))
 
     elapsed_ms = int((time.time() - start) * 1000)
-    log_call(
-        client_id=client_id,
-        endpoint="/api/law/search",
-        query=q,
-        result_count=len(items),
-        elapsed_ms=elapsed_ms,
-    )
     return {
         "items": items,
         "total": len(items),
@@ -627,7 +414,6 @@ async def get_law_article(
     as_of: str | None = Query(
         default=None,
         description="按时间点取条文，格式 YYYY-MM-DD。不传则取现行版（与旧行为一致）。"),
-    client_id: str = Depends(verify_token),
 ):
     """根据法律名称和条号获取法条正文。支持模糊匹配法律名称。"""
     start = time.time()
@@ -636,23 +422,13 @@ async def get_law_article(
         # 避免「网页按现行版、接口按时间点」两套判据各写一遍而走岔。
         item = _store().get_article(law_name, article_num, article_suffix or "",
                                     include_history=include_history, as_of=as_of)
-        elapsed_ms = int((time.time() - start) * 1000)
         if not item:
-            log_call(client_id=client_id, endpoint="/api/law/article",
-                     query=f"{law_name}#{article_num}@{as_of}",
-                     result_count=0, elapsed_ms=elapsed_ms)
             return {"error": "not_found", "law_name": law_name,
                     "article_num": article_num, "as_of": as_of}
         if item.get("error"):
-            log_call(client_id=client_id, endpoint="/api/law/article",
-                     query=f"{law_name}#{article_num}@{as_of}",
-                     result_count=0, elapsed_ms=elapsed_ms)
             return item
         item.setdefault("is_pending", item.get("status") == "pending")
         item.setdefault("is_repealed", item.get("status") == "repealed")
-        log_call(client_id=client_id, endpoint="/api/law/article",
-                 query=f"{law_name}#{article_num}@{as_of}",
-                 result_count=1, elapsed_ms=elapsed_ms)
         return item
     normalized_name = normalize_law_name(law_name)
     original_name = law_name.strip()
@@ -699,10 +475,6 @@ async def get_law_article(
                 (name_to_try, article_num),
             ).fetchone()
             if hit:
-                elapsed_ms = int((time.time() - start) * 1000)
-                log_call(client_id=client_id, endpoint="/api/law/article",
-                         query=f"{law_name}#{article_num}", result_count=0,
-                         elapsed_ms=elapsed_ms)
                 return {
                     "error": "law_repealed",
                     "law_name": hit["law_name"],
@@ -729,15 +501,7 @@ async def get_law_article(
         exact_rows = [r for r in rows if "解释" not in r["law_name"]]
         row = exact_rows[0] if exact_rows else (rows[0] if rows else None)
 
-    elapsed_ms = int((time.time() - start) * 1000)
     if not row:
-        log_call(
-            client_id=client_id,
-            endpoint="/api/law/article",
-            query=f"{law_name}#{article_num}",
-            result_count=0,
-            elapsed_ms=elapsed_ms,
-        )
         logger.warning("Not found: law_name=%s, article_num=%d", normalized_name, article_num)
         return {"error": "not_found", "law_name": law_name, "article_num": article_num}
 
@@ -770,13 +534,6 @@ async def get_law_article(
         "is_principle_clause": bool(row["is_principle_clause"]),
         "source_file": row["source_file"],
     }
-    log_call(
-        client_id=client_id,
-        endpoint="/api/law/article",
-        query=f"{law_name}#{article_num}",
-        result_count=1,
-        elapsed_ms=elapsed_ms,
-    )
     logger.info("Found: law_name=%s, article=%s, content_length=%d",
                 row["law_name"], row["article_number"], len(row["content"] or ""))
     return result
@@ -785,7 +542,6 @@ async def get_law_article(
 @app.get("/api/law/versions")
 async def get_law_versions(
     law_name: str = Query(..., min_length=1),
-    client_id: str = Depends(verify_token),
 ):
     """列出某部法规的全部版本及各自有效区间（施行日 → 下一版施行日前一天）。"""
     versions = _store().list_versions(law_name)
@@ -822,24 +578,14 @@ class VerifyRequest(BaseModel):
 async def verify_law_citations(
     payload: VerifyRequest,
     include_history: bool = Query(default=False, description="是否用旧版本条文参与核验"),
-    client_id: str = Depends(verify_token),
 ):
     """法条批量校验 — 返回完整校验状态（存在性、法律状态、废止信息、原则性条款、多版本歧义）。"""
-    start = time.time()
     # 核验逻辑只在 LawStore.verify 里实现一份。这里以前复制过一遍同样的 SQL，
     # 结果是「并列引文拆分」这类修复补了内核、漏了 HTTP —— agent 调 MCP 能拆，
     # 网页调 HTTP 却只核第一条，还照样报通过。
     data = LawStore(db).verify(payload.citations, include_history=include_history)
     results = data["results"]
 
-    elapsed_ms = int((time.time() - start) * 1000)
-    log_call(
-        client_id=client_id,
-        endpoint="/api/law/verify",
-        query=f"{len(payload.citations)}条",
-        result_count=len(results),
-        elapsed_ms=elapsed_ms,
-    )
     return {
         "results": results,
         "total": len(results),
@@ -859,9 +605,8 @@ async def verify_law_citations(
 # ============================================================
 
 @app.get("/api/law/stats")
-async def law_stats(client_id: str = Depends(verify_token)):
+async def law_stats():
     """返回法规库统计信息。"""
-    start = time.time()
     # SQLite 统计
     try:
         total = db.execute("SELECT COUNT(*) FROM law_articles").fetchone()[0]
@@ -879,14 +624,6 @@ async def law_stats(client_id: str = Depends(verify_token)):
                 "label": r["law_type_label"] or r["law_type"],
             }
     except Exception as e:
-        log_call(
-            client_id=client_id,
-            endpoint="/api/law/stats",
-            query="",
-            result_count=0,
-            elapsed_ms=int((time.time() - start) * 1000),
-            status=500,
-        )
         return {"error": str(e)}
 
     # ChromaDB 统计
@@ -899,14 +636,6 @@ async def law_stats(client_id: str = Depends(verify_token)):
         except Exception:
             chromadb_status = "error"
 
-    elapsed_ms = int((time.time() - start) * 1000)
-    log_call(
-        client_id=client_id,
-        endpoint="/api/law/stats",
-        query="",
-        result_count=1,
-        elapsed_ms=elapsed_ms,
-    )
     effective = db.execute(
         "SELECT COUNT(*) FROM law_articles "
         "WHERE status IS NULL OR status NOT IN ('repealed','pending')"
@@ -970,8 +699,6 @@ async def startup_event():
     logger.info("Law Search Service v%s starting...", APP_VERSION)
     logger.info("SQLite: %s", DB_PATH)
     logger.info("ChromaDB: %s", CHROMA_PATH)
-    logger.info("API keys: %d loaded, enforce=%s", len(API_KEYS), API_ENFORCE)
-    logger.info("Call log: %s", CALL_LOG_PATH)
 
     # 尝试初始化 ChromaDB
     init_chromadb()

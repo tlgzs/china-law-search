@@ -273,27 +273,14 @@ python3 mcp/server.py --selftest           # 装完自检
 
 ## API
 
-服务默认免认证，本地自用够了。要对外开放就设 `LAW_API_ENFORCE=1`，
-在 `data/api_keys.json` 里配 token：
+认证不在本项目范围：服务不校验任何凭据，本地自用直接调用即可。
+如需公网暴露，请在自己前置的反向代理或网关做认证与限流。
 
-```json
-{
-  "my-app": {
-    "token": "换成你的随机串",
-    "tier": "private",
-    "rate_limit_per_min": 0,
-    "rate_limit_per_day": 0
-  }
-}
-```
-
-`tier` 填 `public` 时按 IP 限流，超了返回 `429` 和 `Retry-After`。
-有个例外要注意：开了强制认证却一个 token 都读不到，服务会降级成免认证，
-免得装完打不开——这是有意的，不是漏了校验。
+如需托管版（账号与 API Key 管理），见 https://www.yilvai.com
 
 ### `GET /health`
 
-免认证。返回服务状态、法条总数、现行有效条数、向量库是否启用。
+返回服务状态、法条总数、现行有效条数、向量库是否启用。
 
 ### `GET /api/law/search`
 
@@ -630,9 +617,6 @@ update.sh                      命令行更新；更新数据.command 双击更�
 | `LAW_DATA_DIR` | `./data` | 数据目录，其余路径默认基于它 |
 | `LAW_DB_PATH` | `$LAW_DATA_DIR/law_data.db` | SQLite 库路径 |
 | `LAW_CHROMA_PATH` | `$LAW_DATA_DIR/legal_vector_db` | 向量库路径 |
-| `LAW_API_ENFORCE` | `0` | `1` 时强制 Bearer Token |
-| `LAW_API_KEYS_FILE` | `$LAW_DATA_DIR/api_keys.json` | 令牌表 |
-| `LAW_CALL_LOG_PATH` | `$LAW_DATA_DIR/call_log.jsonl` | 调用日志 |
 | `LAW_EMBEDDING_MODEL` | `BAAI/bge-large-zh-v1.5` | 向量模型 |
 | `LAW_COLLECTION_NAME` | `chinese_laws` | 向量集合名 |
 | `LAW_REPO` | 从 git remote 推断 | 查更新用的仓库 `owner/name` |
@@ -660,8 +644,8 @@ update.sh                      命令行更新；更新数据.command 双击更�
 不做任何改写。发现问题请用[法条纠错](https://github.com/tlgzs/china-law-search/issues/new?template=%E6%B3%95%E6%9D%A1%E7%BA%A0%E9%94%99.yml)
 表单提，附上官方原文对照。
 
-能不能直接对公网开放？技术上可以，但请务必开 `LAW_API_ENFORCE=1` 并配好 token，
-再放在反向代理后面。默认的免认证模式只适合本机。
+能不能直接对公网开放？请勿直接暴露。本项目不做认证，公网访问必须放在
+带认证的反向代理或网关后面。
 
 ## 边界
 

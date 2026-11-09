@@ -131,10 +131,6 @@
     <button class="ub-x" id="updateClose" title="本次忽略">×</button>
   </div>
 
-  <div class="banner" id="authBanner">
-    需要 API Token 才能查询：<input type="text" id="tokenInput" placeholder="粘贴 token 后回车">
-  </div>
-
   <div class="tabs">
     <button class="tab active" data-tab="search">法条检索</button>
     <button class="tab" data-tab="lookup">条文定位</button>
@@ -215,17 +211,13 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-let token = localStorage.getItem("law_api_token") || "";
 
 function headers(extra) {
-  const h = Object.assign({"Content-Type": "application/json"}, extra || {});
-  if (token) h["Authorization"] = "Bearer " + token;
-  return h;
+  return Object.assign({"Content-Type": "application/json"}, extra || {});
 }
 
 async function api(path, opts) {
   const res = await fetch(path, Object.assign({headers: headers()}, opts || {}));
-  if (res.status === 401) { $("#authBanner").style.display = "block"; throw new Error("需要 Token"); }
   if (!res.ok) throw new Error("请求失败 " + res.status);
   return res.json();
 }
@@ -497,13 +489,6 @@ $("#btnLookup").addEventListener("click", lookup);
   $("#" + id).addEventListener("keydown", e => { if (e.key === "Enter") lookup(); });
 });
 $("#btnVerify").addEventListener("click", verify);
-$("#tokenInput").addEventListener("keydown", e => {
-  if (e.key !== "Enter") return;
-  token = e.target.value.trim();
-  localStorage.setItem("law_api_token", token);
-  $("#authBanner").style.display = "none";
-  loadStatus();
-});
 document.addEventListener("keydown", e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#q").focus(); }
 });

@@ -1,5 +1,9 @@
 # 接入 agent（MCP）
 
+> 本目录是**本地版** MCP：只走 stdio、直连本地 SQLite，不联网、不校验凭据，
+> 也不含账号体系与 API Key。托管版（账号与 API Key 管理）另属商业产品，
+> 与本仓库无关。
+
 让 WorkBuddy、Trae、ZCode、Claude Code、Codex、Cursor 这些 agent 直接查法条，
 不必你再复制粘贴。
 

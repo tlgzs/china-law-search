@@ -55,7 +55,6 @@ if [ ! -f data/law_data.db ]; then
   echo ""
 fi
 
-export LAW_API_ENFORCE=${LAW_API_ENFORCE:-0}
 export LAW_HOST=${LAW_HOST:-127.0.0.1}
 
 # 8001 被占用时顺延，避免「端口已占用」直接起不来。

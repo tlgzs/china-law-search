@@ -5,7 +5,5 @@ services:
       - "8001:8001"
     volumes:
       - ./data:/app/data
-    environment:
-      # 本地自用保持 0；对公网开放时改 1，并在 data/api_keys.json 配 token
-      LAW_API_ENFORCE: "0"
+    # 如需公网暴露，请前置反向代理自行鉴权
     restart: unless-stopped
