@@ -114,11 +114,14 @@ TOOLS = [
             "适合已经知道出处（例如「劳动合同法第八十二条」）时使用。\n"
             "支持增补条：条号写「第一百三十三条之一」或分别传 article_number=133、"
             "article_suffix=之一，两者不会串号。\n"
-            "返回的 status 为 effective 表示现行有效，repealed 表示已被修订"
-            "（此时 repeal_date / replaced_by 会给出失效日期和替代法规）。\n"
-            "若 status 为 pending（is_pending=true），说明该条已公布但尚未生效，"
-            "effective_date 是施行日，此时不得作为现行有效依据引用。\n"
-            "citation_hint 字段可直接复制为规范引用格式。"
+            "返回的 citation_valid 是唯一判据：true 才能作为现行有效依据引用；"
+            "false 时看 article_status —— in_force（已公布未生效）、"
+            "removed_in_current（现行版已删除或合并，previous_content 是最后原文）、"
+            "renumbered（条号已调整，renumber_candidates 是相近新条号）、"
+            "repealed（该条或该法规确已废止，repeal_date 为废止日期）、"
+            "unknown（库内未收录现行版，无法确认）。\n"
+            "version 字段给出本条所属版本的 version_id / publish_date / effective_date / "
+            "is_current / article_count。被删条号仍会返回旧版原文，不会只报「查不到」。"
         ),
         "inputSchema": {
             "type": "object",
@@ -259,6 +262,10 @@ TOOLS = [
             "核验一批法条引用：是否存在、是否现行有效、是否有多个版本、内容与库里是否一致。\n"
             "**在用任何法条支撑结论之前，先跑这一步**——这是本服务器最有价值的工具，"
             "专门用来防止编造条号或引用已废止条文。\n"
+            "每条结果看 citation_valid：true 可引；false 时 article_status 说明原因"
+            "（removed_in_current 表示现行版删除或合并，renumbered 表示条号已调整，"
+            "repealed 表示确已废止，unknown 表示库内无现行版）。"
+            "「现行版删除某条」不等于「整部法规废止」，不要据此否定整部法规。\n"
             "引用写成「《劳动合同法》第八十二条」或对象 {law_name, article_number} 都可以。"
         ),
         "inputSchema": {
@@ -401,6 +408,9 @@ class LawMcpServer:
                 if item.get("effective_date") else
                 "该条文已公布但尚未生效，不得作为现行有效依据引用"
             )
+        elif item.get("message") and not item.get("citation_valid"):
+            # 删除 / 改号 / 废止 / 无现行版：把状态层的话原样交给客户端，别让它自己猜
+            item["warning"] = item["message"]
         return _ok({"article": item, "data_snapshot": self.snapshot()})
 
     def tool_get_law_versions(self, args: dict) -> dict:

@@ -430,113 +430,21 @@ async def get_law_article(
         item.setdefault("is_pending", item.get("status") == "pending")
         item.setdefault("is_repealed", item.get("status") == "repealed")
         return item
-    normalized_name = normalize_law_name(law_name)
-    original_name = law_name.strip()
-    history_filter = "" if include_history else " AND (status IS NULL OR status != 'repealed')"
-    # 没指定后缀时只认正条，避免「第八十二条」把「第八十二条之一」串进来
-    suffix_filter = " AND article_suffix = ?" if article_suffix else \
-        " AND (article_suffix = '' OR article_suffix IS NULL)"
-    suffix_args: tuple = (article_suffix,) if article_suffix else ()
-    logger.info("Looking up: law_name=%s (normalized=%s), article_num=%d",
-                law_name, normalized_name, article_num)
-
-    # 精确匹配。候选名除了用户原样和归一化名，还要加上从 law_versions 反查到的
-    # 正式全称：条文的 law_name 带书名号，用户输入一般不带，直接比对必然落空。
-    row = None
-    name_candidates = [original_name, normalized_name]
-    for canonical in resolve_law_names(db, law_name):
-        if canonical not in name_candidates:
-            name_candidates.append(canonical)
-    for name_to_try in name_candidates:
-        row = db.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                      article_suffix, chapter, section, article, content, publish_date, effective_date,
-                      status, repeal_date, repeal_reason, replaced_by, is_principle_clause,
-                      source_file
-               FROM law_articles
-               WHERE law_name = ? AND article_number_num = ?{history_filter}{suffix_filter}
-               ORDER BY {status_rank()}, id DESC
-               LIMIT 1""",
-            (name_to_try, article_num, *suffix_args),
-        ).fetchone()
-        if row:
-            break
-
-    # 正文全都标了 repealed 的，是整部法规被废止了。必须在模糊匹配之前拦下来：
-    # 否则 LIKE 会滑到「关于废止《X》的决定」那一条上去 —— 决定的名字里含 X，
-    # 于是查 X 返回的是决定正文，状态还显示现行有效，比查不到更糟。
-    if not row:
-        for name_to_try in name_candidates:
-            hit = db.execute(
-                """SELECT law_name, repeal_date, repeal_reason FROM law_articles
-                   WHERE law_name = ? AND article_number_num = ?
-                     AND status = 'repealed'
-                   ORDER BY id DESC LIMIT 1""",
-                (name_to_try, article_num),
-            ).fetchone()
-            if hit:
-                return {
-                    "error": "law_repealed",
-                    "law_name": hit["law_name"],
-                    "article_num": article_num,
-                    "repeal_date": hit["repeal_date"],
-                    "repeal_reason": hit["repeal_reason"],
-                    "message": "该法规已废止，条文不作为现行有效依据。"
-                               "确需查看原文可加 include_history=true。",
-                }
-
-    # 模糊匹配
-    if not row:
-        rows = db.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                      article_suffix, chapter, section, article, content, publish_date, effective_date,
-                      status, repeal_date, repeal_reason, replaced_by, is_principle_clause,
-                      source_file
-               FROM law_articles
-               WHERE (law_name LIKE ? OR law_name LIKE ?) AND article_number_num = ?{history_filter}{suffix_filter}
-               ORDER BY {status_rank()}, LENGTH(law_name) ASC
-               LIMIT 5""",
-            (f"%{normalized_name}%", f"%{original_name}%", article_num, *suffix_args),
-        ).fetchall()
-        exact_rows = [r for r in rows if "解释" not in r["law_name"]]
-        row = exact_rows[0] if exact_rows else (rows[0] if rows else None)
-
-    if not row:
-        logger.warning("Not found: law_name=%s, article_num=%d", normalized_name, article_num)
+    # 状态判定只在 law_state 里实现一份。这里以前自己拼 SQL，结果是「被修订取代」
+    # 被当成「废止」返回，与 MCP 的结论不一致。现在两条入口共用同一内核。
+    item = _store().get_article(law_name, article_num, article_suffix or "",
+                                include_history=include_history)
+    if not item:
+        logger.warning("Not found: law_name=%s, article_num=%d", law_name, article_num)
         return {"error": "not_found", "law_name": law_name, "article_num": article_num}
-
-    # 这个接口不经过 law_query_core.row_to_item，自己拼返回值，
-    # 所以 pending 归一与 is_pending 必须在这里单独补一次 —— 漏了就会出现
-    # 「引文核验提示尚未生效、单条查询却显示现行有效」的自相矛盾。
-    _status = row["status"] or "effective"
-    _eff = row["effective_date"] or ""
-    if _status == "pending" and _eff and _eff <= datetime.date.today().isoformat():
-        _status = "effective"
-    result = {
-        "law_name": row["law_name"],
-        "law_type": row["law_type"],
-        "law_type_label": row["law_type_label"],
-        "article_number": row["article_number"],
-        "article_num": row["article_number_num"],
-        "article_suffix": row["article_suffix"] or "",
-        "chapter": row["chapter"],
-        "section": row["section"],
-        "article": row["article"],
-        "content": row["content"],
-        "publish_date": row["publish_date"] or "",
-        "effective_date": _eff,
-        "status": _status,
-        "is_pending": _status == "pending",
-        "is_repealed": _status == "repealed",
-        "repeal_date": row["repeal_date"] or "",
-        "repeal_reason": row["repeal_reason"] or "",
-        "replaced_by": row["replaced_by"] or "",
-        "is_principle_clause": bool(row["is_principle_clause"]),
-        "source_file": row["source_file"],
-    }
-    logger.info("Found: law_name=%s, article=%s, content_length=%d",
-                row["law_name"], row["article_number"], len(row["content"] or ""))
-    return result
+    if item.get("error"):
+        return item
+    item.setdefault("is_pending", item.get("status") == "pending")
+    item.setdefault("is_repealed", item.get("status") == "repealed")
+    logger.info("Found: law_name=%s, article=%s, article_status=%s",
+                item.get("law_name"), item.get("article_number"),
+                item.get("article_status"))
+    return item
 
 
 @app.get("/api/law/versions")

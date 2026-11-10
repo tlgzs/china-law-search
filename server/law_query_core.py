@@ -25,6 +25,11 @@ import math
 import re
 import sqlite3
 
+try:  # 以 `uvicorn server.law_search_service:app` 启动
+    from . import law_state  # noqa: PLC0415
+except ImportError:  # 以 `python mcp/server.py` 直接把 server/ 放进 sys.path
+    import law_state  # type: ignore[no-redef]  # noqa: PLC0415
+
 
 def _today() -> str:
     return datetime.date.today().isoformat()
@@ -401,17 +406,32 @@ def _build_verify_result(
     is_principle_clause: bool = False,
     has_multiple_versions: bool = False,
     source_citation: str = "",
+    law_status: str | None = None,
+    article_status: str | None = None,
+    citation_valid: bool = False,
+    version: dict | None = None,
+    message: str | None = None,
+    previous_version: dict | None = None,
+    previous_content: str | None = None,
+    previous_article_number: str | None = None,
+    renumber_candidates: list | None = None,
 ) -> dict:
-    """构建校验结果，确保所有字段都返回。"""
+    """构建校验结果，确保所有字段都返回。
+
+    新旧字段并存：status / is_pending / is_repealed 保持旧调用方可用，
+    law_status / article_status / citation_valid / version 是本次新增的
+    唯一判据。上层判断「能不能引」只看 citation_valid，不要再组合 status。
+    """
     pending = status == "pending"
 
-    if pending:
+    if message:
+        warning = message
+    elif pending:
         warning = (f"该条文已公布但尚未生效，{effective_date} 起施行，"
                    "不得作为现行有效依据引用") if effective_date else \
                   "该条文已公布但尚未生效，不得作为现行有效依据引用"
-    elif status == "repealed":
-        # 法规被废止与条文被修订是两回事：前者整部法不能再引，
-        # 这里要说清依据和日期，否则律师只看到「未找到」会以为是库没收。
+    elif status == "repealed" and law_status != law_state.LAW_EFFECTIVE:
+        # 整部法废止才说「该法规已废止」；条文单独废止不能说成整部法废止。
         basis = repeal_reason or ""
         if basis.startswith("被") and basis.endswith("废止"):
             basis = basis[1:-2]          # 剥掉「被…废止」的外壳，避免「废止（…废止）」
@@ -421,6 +441,8 @@ def _build_verify_result(
                        f"该法规已废止，依据：{basis}，不得作为现行依据引用")
         else:
             warning = "该法规已废止，不得作为现行依据引用"
+    elif status == "repealed":
+        warning = "该条文已被单独废止，不得作为现行有效依据引用"
     else:
         warning = None
 
@@ -444,6 +466,15 @@ def _build_verify_result(
         "has_multiple_versions": has_multiple_versions,
         # 一行并列引文会拆成多条结果，调用方靠这个字段把结果对回原文
         "source_citation": source_citation,
+        # 本次统一后的语义字段
+        "law_status": law_status,
+        "article_status": article_status,
+        "citation_valid": citation_valid,
+        "version": version,
+        "previous_version": previous_version,
+        "previous_content": previous_content,
+        "previous_article_number": previous_article_number,
+        "renumber_candidates": renumber_candidates or [],
     }
 
 
@@ -548,55 +579,58 @@ class LawStore:
         include_history: bool = False,
         as_of: str | None = None,
     ) -> dict | None:
-        """法名 + 条号 → 条文。精确匹配优先，其次模糊匹配（排除司法解释误命中）。
+        """法名 + 条号 → 条文与状态。
 
-        `as_of`（YYYY-MM-DD）一传，就按「那一天正在施行的版本」取。
-        不传则与旧行为完全一致：取现行版，其次已公布未生效版。
+        状态判定统一走 server/law_state.py：HTTP /api/law/article 与 MCP
+        get_article 共用这一份，不再各写一套「查不到就当整部废止」。
+        `as_of` 仍按时间点取版本（与状态推导是两件事），保持原行为。
         """
         if as_of:
             return self._get_article_as_of(law_name, article_num, article_suffix, as_of)
-        normalized_name = normalize_law_name(law_name)
-        original_name = (law_name or "").strip()
-        history_filter = self._history_clause(include_history, "law_articles")
-        suffix_filter, suffix_args = self._suffix_clause(article_suffix)
 
-        row = None
-        for name_to_try in (original_name, normalized_name):
-            row = self.conn.execute(
-                f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                          article_suffix, chapter, section, article, content, publish_date,
-                          effective_date, status, repeal_date, repeal_reason, replaced_by,
-                          is_principle_clause, source_file
-                   FROM law_articles
-                   WHERE law_name = ? AND article_number_num = ?{history_filter}{suffix_filter}
-                   ORDER BY {status_rank()}, id DESC
-                   LIMIT 1""",
-                (name_to_try, article_num, *suffix_args),
-            ).fetchone()
-            if row:
-                break
-
-        if not row:
-            rows = self.conn.execute(
-                f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                          article_suffix, chapter, section, article, content, publish_date,
-                          effective_date, status, repeal_date, repeal_reason, replaced_by,
-                          is_principle_clause, source_file
-                   FROM law_articles
-                   WHERE (law_name LIKE ? OR law_name LIKE ?)
-                     AND article_number_num = ?{history_filter}{suffix_filter}
-                   ORDER BY {status_rank()}, LENGTH(law_name) ASC
-                   LIMIT 5""",
-                (f"%{normalized_name}%", f"%{original_name}%", article_num, *suffix_args),
-            ).fetchall()
-            # 「解释」类文件常包含被解释法的同名条文，优先取非解释的
-            exact_rows = [r for r in rows if "解释" not in r["law_name"]]
-            row = exact_rows[0] if exact_rows else (rows[0] if rows else None)
-
-        if not row:
+        candidates = self._name_candidates(law_name)
+        result = law_state.resolve_article(
+            self.conn, candidates, article_num, article_suffix,
+            include_history=include_history,
+            article_number_text=f"第{article_num}条{article_suffix}",
+        )
+        if result is None:
+            # 精确名与归一化名都找不到，再做一次宽松匹配（「民法典」这类简称）
+            resolved = self.resolve_law_name(law_name, include_history=True)
+            extra = [resolved.get("law_name")] + list(resolved.get("candidates") or [])
+            extra = [n for n in extra if n and n not in candidates]
+            if extra:
+                candidates = candidates + extra
+                result = law_state.resolve_article(
+                    self.conn, candidates, article_num, article_suffix,
+                    include_history=include_history,
+                    article_number_text=f"第{article_num}条{article_suffix}",
+                )
+        if result is None:
             return None
+        self._attach_law_meta(result)
+        return result
 
-        return self._article_item(row)
+    def _name_candidates(self, law_name: str) -> list[str]:
+        """法名候选：原样、去书名号、law_versions 里反查到的正式全称。"""
+        candidates = [law_name, normalize_law_name(law_name)]
+        for canonical in resolve_law_names(self.conn, law_name):
+            if canonical not in candidates:
+                candidates.append(canonical)
+        return [n for n in candidates if n]
+
+    def _attach_law_meta(self, result: dict) -> None:
+        """补上旧接口一直返回的展示字段（状态模块不关心这些）。"""
+        row = self.conn.execute(
+            "SELECT law_type, law_type_label, source_file FROM law_articles "
+            "WHERE law_name = ? ORDER BY id DESC LIMIT 1",
+            (result["law_name"],),
+        ).fetchone()
+        result.setdefault("law_type", row["law_type"] if row else None)
+        result.setdefault("law_type_label", row["law_type_label"] if row else None)
+        result.setdefault("source_file", row["source_file"] if row else "")
+        if "version_id" not in result:
+            result["version_id"] = (result.get("version") or {}).get("version_id")
 
     @staticmethod
     def _article_item(row) -> dict:
@@ -666,9 +700,8 @@ class LawStore:
                            article_suffix: str, as_of: str) -> dict | None:
         """按时间点取条文：办旧案子要引当年施行的版本，不能拿最新版套。
 
-        找不到覆盖该日期的版本时**不返回 None**，而是返回带 error 与版本区间的
-        结构化结果 —— 让调用方能直接告诉用户「这部法 2019 年还没有施行」，
-        而不是含糊地报「查不到条文」。
+        版本选择与状态推导都交给 law_state，保证与默认查询同一套语义：
+        历史行上的 repealed 只是「被新版取代」，不能回成「已废止」。
         """
         day = (as_of or "").strip()
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
@@ -679,43 +712,24 @@ class LawStore:
         if not versions:
             return None
 
-        covered = [v for v in versions if v["effective_date"] and v["effective_date"] <= day]
-        if not covered:
-            return {
-                "error": "no_version_in_force",
-                "law_name": versions[0]["law_name"],
-                "as_of": day,
-                "message": f"该法规在 {day} 尚无施行版本（最早版本施行于 "
-                           f"{versions[0]['effective_date'] or '未知日期'}）。",
-                "available_versions": versions,
-            }
+        candidates = self._name_candidates(law_name)
+        result = law_state.resolve_article(
+            self.conn, candidates, article_num, article_suffix,
+            article_number_text=f"第{article_num}条{article_suffix}", as_of=day,
+        )
+        if result is None:
+            return None
 
-        chosen = covered[-1]
-        suffix_filter, suffix_args = self._suffix_clause(article_suffix)
-        row = self.conn.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                      article_suffix, chapter, section, article, content, publish_date,
-                      effective_date, status, repeal_date, repeal_reason, replaced_by,
-                      is_principle_clause, source_file
-               FROM law_articles
-               WHERE version_id = ? AND article_number_num = ?{suffix_filter}
-               LIMIT 1""",
-            (chosen["version_id"], article_num, *suffix_args),
-        ).fetchone()
-        if not row:
-            return {
-                "error": "article_not_in_version",
-                "law_name": chosen["law_name"],
-                "as_of": day,
-                "message": f"该版本（施行于 {chosen['effective_date']}）没有第 {article_num} 条。",
-                "available_versions": versions,
-            }
-
-        item = self._article_item(row)
-        item["as_of"] = day
-        item["version_id"] = chosen["version_id"]
-        item["version_effective_date"] = chosen["effective_date"]
-        return item
+        self._attach_law_meta(result)
+        result["as_of"] = day
+        if result.get("error"):
+            result["law_name"] = result.get("law_name") or versions[0]["law_name"]
+            result["available_versions"] = versions
+            return result
+        result["version_id"] = (result.get("version") or {}).get("version_id")
+        result["version_effective_date"] = \
+            (result.get("version") or {}).get("effective_date", "")
+        return result
 
     def resolve_law_name(self, law_name: str, include_history: bool = True) -> dict:
         """把用户输入的法名解析到库里的规范名称。
@@ -1087,7 +1101,6 @@ class LawStore:
     def verify(self, citations: list, include_history: bool = False) -> dict:
         """批量核验引用是否存在、是否现行、是否多版本歧义。"""
         results: list[dict] = []
-        history_filter = self._history_clause(include_history, "law_articles")
 
         # 并列引文（「第八十二条、第八十七条」）先展开，一行引两个条文就得核两次。
         # 放在这里而不是前端，是为了让 HTTP 与 MCP 两条路径行为一致。
@@ -1128,102 +1141,100 @@ class LawStore:
                 ))
                 continue
 
-            normalized = normalize_law_name(law_name)
-            suffix_filter, suffix_args = self._suffix_clause(article_suffix)
-            # 顺序很重要：先精确同名，再判「已废止」，最后才模糊。
-            # 模糊之所以不能打头，是因为「关于废止《X》的决定」的名字里含 X，
-            # 查 X 会被 LIKE 拽到那条决定上，核验结论变成「该条文现行有效」。
-            candidates = [law_name, normalized]
-            for canonical in resolve_law_names(self.conn, law_name):
-                if canonical not in candidates:
-                    candidates.append(canonical)
-
-            rows = []
-            for name_hint in candidates:
-                rows = self.conn.execute(
-                    f"""SELECT law_name, article_number, article_number_num, article_suffix,
-                              version_id, content, publish_date, effective_date, status,
-                              repeal_date, repeal_reason, replaced_by, is_principle_clause
-                       FROM law_articles
-                       WHERE law_name = ?
-                         AND article_number_num = ?{history_filter}{suffix_filter}
-                       ORDER BY {status_rank()}, id DESC""",
-                    (name_hint, article_num, *suffix_args),
-                ).fetchall()
-                if rows:
-                    break
-
-            if not rows:
-                # 同名法规在库里、条文却全部标了 repealed：整部法规被废止了。
-                # 这时候不能退到 LIKE 去找「名字相近的别的法规」。
-                hint = None
-                for name_hint in candidates:
-                    hint = self.conn.execute(
-                        f"""SELECT law_name, repeal_date, repeal_reason FROM law_articles
-                            WHERE status = 'repealed' AND law_name = ?
-                              AND article_number_num = ?{suffix_filter}
-                            ORDER BY id DESC LIMIT 1""",
-                        (name_hint, article_num, *suffix_args),
-                    ).fetchone()
-                    if hint:
-                        break
-
-                if hint:
-                    results.append(_build_verify_result(
-                        law_name=hint["law_name"], article_number=article_number_str,
-                        verified=False, status="repealed",
-                        repeal_date=hint["repeal_date"],
-                        repeal_reason=hint["repeal_reason"],
-                        error="该法规已废止",
-                        source_citation=source_text,
-                    ))
-                    continue
-
+            # 状态判定统一交给 law_state，与 /api/law/article、MCP get_article
+            # 共用同一套规则；这里只负责把结果翻译成核验结构。
+            candidates = self._name_candidates(law_name)
+            res = law_state.resolve_article(
+                self.conn, candidates, article_num, article_suffix,
+                include_history=include_history,
+                article_number_text=article_number_str,
+            )
+            if res is None:
                 # 精确名都不存在，才放宽成包含匹配（处理「民法典」这类简称）
-                rows = self.conn.execute(
-                    f"""SELECT law_name, article_number, article_number_num, article_suffix,
-                              version_id, content, publish_date, effective_date, status,
-                              repeal_date, repeal_reason, replaced_by, is_principle_clause
-                       FROM law_articles
-                       WHERE (law_name LIKE ? OR law_name LIKE ?)
-                         AND article_number_num = ?{history_filter}{suffix_filter}
-                       ORDER BY {status_rank()}, LENGTH(law_name) ASC""",
-                    (f"%{normalized}%", f"%{law_name}%", article_num, *suffix_args),
-                ).fetchall()
+                resolved = self.resolve_law_name(law_name, include_history=True)
+                extra = [resolved.get("law_name")] + list(resolved.get("candidates") or [])
+                extra = [n for n in extra if n and n not in candidates]
+                if extra:
+                    res = law_state.resolve_article(
+                        self.conn, candidates + extra, article_num, article_suffix,
+                        include_history=include_history,
+                        article_number_text=article_number_str,
+                    )
 
-            if not rows:
+            if res is None or res.get("error") == "not_found":
                 results.append(_build_verify_result(
-                    law_name=law_name, article_number=article_number_str,
-                    verified=False, error="未找到该法条",
+                    law_name=(res or {}).get("law_name") or law_name,
+                    article_number=article_number_str,
+                    verified=False,
+                    error=(res or {}).get("message") or "未找到该法条",
+                    law_status=(res or {}).get("law_status"),
+                    version=(res or {}).get("version"),
                     source_citation=source_text,
                 ))
                 continue
 
-            non_interpretation = [r for r in rows if "解释" not in r["law_name"]]
-            selected_rows = non_interpretation if non_interpretation else rows
+            article_status = res.get("article_status")
 
-            # 多版本歧义只看同一部法规（同名）是否还有别的版本记录
-            row = selected_rows[0]
-            same_law = [r for r in selected_rows if r["law_name"] == row["law_name"]]
-            versions = {(r["version_id"], r["publish_date"] or "") for r in same_law}
-            row_status = row["status"] or "effective"
-            row_eff = row["effective_date"] or ""
-            if row_status == "pending" and row_eff and row_eff <= _today():
-                row_status = "effective"
+            if article_status == law_state.ARTICLE_IN_FORCE:
+                results.append(_build_verify_result(
+                    law_name=res["law_name"],
+                    article_number=res["article_number"],
+                    article_suffix=res["article_suffix"],
+                    verified=True,
+                    actual_content=res["content"],
+                    status=res["status"],
+                    effective_date=res["effective_date"],
+                    repeal_date=res["repeal_date"],
+                    repeal_reason=res["repeal_reason"],
+                    replaced_by=res["replaced_by"],
+                    is_principle_clause=res["is_principle_clause"],
+                    has_multiple_versions=res["has_multiple_versions"],
+                    source_citation=source_text,
+                    law_status=res["law_status"],
+                    article_status=article_status,
+                    citation_valid=res["citation_valid"],
+                    version=res["version"],
+                    message=res.get("message"),
+                    previous_version=res.get("previous_version"),
+                    previous_content=res.get("previous_content"),
+                    previous_article_number=res.get("previous_article_number"),
+                    renumber_candidates=res.get("renumber_candidates"),
+                ))
+                continue
+
+            errors = {
+                law_state.ARTICLE_REMOVED: "现行版已删除该条",
+                law_state.ARTICLE_RENUMBERED: "该条号已在现行版调整",
+                law_state.ARTICLE_REPEALED: (
+                    "该法规已废止"
+                    if res["law_status"] == law_state.LAW_REPEALED
+                    else "该条文已废止"
+                ),
+                law_state.ARTICLE_UNKNOWN: "未收录现行版，无法确认",
+            }
             results.append(_build_verify_result(
-                law_name=row["law_name"],
-                article_number=row["article_number"],
-                article_suffix=row["article_suffix"] or "",
-                verified=True,
-                actual_content=row["content"],
-                status=row_status,
-                effective_date=row_eff,
-                repeal_date=row["repeal_date"] or "",
-                repeal_reason=row["repeal_reason"] or "",
-                replaced_by=row["replaced_by"] or "",
-                is_principle_clause=bool(row["is_principle_clause"]),
-                has_multiple_versions=len(versions) > 1,
+                law_name=res["law_name"],
+                article_number=res["article_number"],
+                article_suffix=res["article_suffix"],
+                verified=False,
+                error=errors.get(article_status, "未找到该法条"),
+                status=res["status"],
+                effective_date=res["effective_date"],
+                repeal_date=res["repeal_date"],
+                repeal_reason=res["repeal_reason"],
+                replaced_by=res["replaced_by"],
+                is_principle_clause=res["is_principle_clause"],
+                has_multiple_versions=res["has_multiple_versions"],
                 source_citation=source_text,
+                law_status=res["law_status"],
+                article_status=article_status,
+                citation_valid=res["citation_valid"],
+                version=res["version"],
+                message=res.get("message"),
+                previous_version=res.get("previous_version"),
+                previous_content=res.get("previous_content"),
+                previous_article_number=res.get("previous_article_number"),
+                renumber_candidates=res.get("renumber_candidates"),
             ))
 
         return {

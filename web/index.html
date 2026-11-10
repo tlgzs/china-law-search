@@ -329,10 +329,13 @@ async function runUpdate() {
 function itemHtml(it, q, i) {
   const dead = it.is_repealed;
   const pending = it.is_pending;
+  const deadLabel = dead
+    ? (it.replaced_by ? "旧版条文 · 已被新版取代" : "已废止")
+    : "";
   const tags = [
     `<span class="tag">${esc(it.article_number || "")}</span>`,
     it.law_type_label ? `<span class="tag law">${esc(it.law_type_label)}</span>` : "",
-    dead ? `<span class="tag bad">已失效${it.repeal_date ? " · " + esc(it.repeal_date) : ""}</span>` : "",
+    dead ? `<span class="tag bad">${deadLabel}${it.repeal_date ? " · " + esc(it.repeal_date) : ""}</span>` : "",
     pending ? `<span class="tag warn">尚未生效${it.effective_date ? " · " + esc(it.effective_date) + " 起施行" : ""}</span>` : ""
   ].join("");
   return `
@@ -412,25 +415,36 @@ async function lookup() {
         可能是法名写法不同，或该条确实不存在——检索页搜关键词更容易命中。</div>`;
       return;
     }
-    const dead = d.status === "repealed" || d.status === "superseded";
+    const st = d.article_status || "";
     const pending = d.status === "pending";
+    const historical = st === "in_force" && d.status === "superseded";
+    const dead = st === "repealed";
+    const removed = st === "removed_in_current" || st === "renumbered";
+    const unknown = st === "unknown";
+    const stateText = dead ? "已废止"
+      : removed ? (st === "renumbered" ? "条号已调整" : "现行版已删除")
+      : unknown ? "无法确认（库内无现行版）"
+      : historical ? "当时有效"
+      : pending ? "尚未生效" : "现行有效";
+    const content = d.content || d.previous_content || "";
     out.innerHTML = `
       <div class="full">
         <h2>${esc(d.law_name)}
           <span class="tag">${esc(d.article_number)}</span>
           ${d.law_type_label ? `<span class="tag law">${esc(d.law_type_label)}</span>` : ""}
-          ${dead ? `<span class="tag bad">已失效</span>` : ""}
+          ${dead ? `<span class="tag bad">已废止</span>` : ""}
+          ${removed ? `<span class="tag bad">${stateText}</span>` : ""}
           ${pending ? `<span class="tag warn">尚未生效</span>` : ""}
         </h2>
-        <div class="body">${esc(d.content)}</div>
+        <div class="body">${esc(content)}</div>
         <div class="foot">
           <span>章节：${esc(d.chapter || "—")} ${d.section ? "· " + esc(d.section) : ""}</span>
           <span>公布：${esc(d.publish_date || "—")}</span>
           <span>施行：${esc(d.effective_date || "—")}</span>
-          <span>状态：${dead ? "已失效" : (pending ? "尚未生效" : "现行有效")}</span>
-          ${d.repeal_date ? `<span>失效日期：${esc(d.repeal_date)}</span>` : ""}
+          <span>状态：${stateText}</span>
+          ${d.repeal_date ? `<span>废止日期：${esc(d.repeal_date)}</span>` : ""}
         </div>
-        ${pending ? `<div class="warnbar">该条文已公布但尚未生效，${esc(d.effective_date || "")} 起施行，不得作为现行有效依据引用。</div>` : ""}
+        ${d.message ? `<div class="warnbar">${esc(d.message)}</div>` : ""}
       </div>`;
   } catch (e) {
     out.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
