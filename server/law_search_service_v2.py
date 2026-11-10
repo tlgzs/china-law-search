@@ -429,6 +429,126 @@ async def health():
 
 
 # ============================================================
+# 整部法规查询：纯法名分档返回
+# ============================================================
+
+# 纯法名识别口径与 yilvai law_service.is_law_title_query 保持一致
+_TITLE_SUFFIX_PATTERN = re.compile(r"(法典|法|条例|规定|办法|通则|细则|规则|决定|解释|准则)$")
+_TITLE_DECORATION_PATTERN = re.compile(r"[《》〈〉\s]")
+_TITLE_SENTENCE_PATTERN = re.compile(r"[，,。；;：:、？！?!]")
+_TITLE_MAX_LENGTH = 60
+
+# 分档与出口闸：现行版 ≤60 条才可能整部返回；全文单次最多 30 条、
+# 正文合计最多 20000 字符，任一超限转目录模式。
+TITLE_FULL_MAX_ARTICLES = 60
+EXPORT_MAX_ITEMS = 30
+EXPORT_MAX_CONTENT_CHARS = 20000
+
+
+def _is_law_title_query(q: str) -> bool:
+    """只包含法规名称（无句读、以法规后缀结尾）时返回 True。"""
+    cleaned = _TITLE_DECORATION_PATTERN.sub("", q or "")
+    if len(cleaned) < 3 or len(cleaned) > _TITLE_MAX_LENGTH:
+        return False
+    if _TITLE_SENTENCE_PATTERN.search(cleaned):
+        return False
+    return bool(_TITLE_SUFFIX_PATTERN.search(cleaned))
+
+
+def _first_sentence(content: str, limit: int = 60) -> str:
+    """目录用正文首句：取首个句读，超长再截断，避免目录本身过长。"""
+    text = (content or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"[。；;！!？?]", text)
+    sentence = text[:match.start() + 1] if match else text
+    return sentence if len(sentence) <= limit else sentence[:limit] + "…"
+
+
+def _search_title_in_sqlite(q: str) -> dict | None:
+    """纯法名查询：按现行版本整部返回或返回目录。
+
+    返回 None 表示无法在库内精确定位该法名，调用方回退普通 FTS 检索，
+    行为与改动前一致。
+    """
+    title = normalize_law_name(q)
+    law = law_state.classify_law(db, _law_name_candidates(title))
+    # 只认精确法名：简称/模糊名走原检索，避免「城市绿化管理条例」随便命中某市条例
+    if not law or normalize_law_name(law["law_name"]) != title:
+        return None
+    current = law.get("current_version")
+    if not current:
+        return None
+
+    rows = db.execute(
+        """SELECT article_number, article_number_num, chapter, section, content,
+                  publish_date, effective_date
+           FROM law_articles
+           WHERE version_id = ? AND (status IS NULL OR status != 'repealed')
+           ORDER BY article_number_num ASC, COALESCE(article_suffix, '') ASC""",
+        (current["version_id"],),
+    ).fetchall()
+    if not rows:
+        return None
+
+    meta_row = db.execute(
+        "SELECT law_type, law_type_label FROM law_articles WHERE version_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (current["version_id"],),
+    ).fetchone()
+    law_type = (meta_row["law_type"] or "") if meta_row else ""
+    law_type_label = (meta_row["law_type_label"] or "") if meta_row else ""
+
+    info = {
+        "law_name": law["law_name"],
+        "version_publish_date": current.get("publish_date", ""),
+        "version_effective_date": current.get("effective_date", ""),
+        "article_count": len(rows),
+        "law_status": law["law_status"],
+    }
+
+    total_chars = sum(len(r["content"] or "") for r in rows)
+    full = (
+        len(rows) <= TITLE_FULL_MAX_ARTICLES
+        and len(rows) <= EXPORT_MAX_ITEMS
+        and total_chars <= EXPORT_MAX_CONTENT_CHARS
+    )
+
+    items: list[dict] = []
+    for index, r in enumerate(rows):
+        item = {
+            "law_name": law["law_name"],
+            "law_type": law_type,
+            "law_type_label": law_type_label,
+            "article_number": r["article_number"],
+            "article_num": r["article_number_num"],
+            "chapter": r["chapter"] or "",
+            "section": r["section"] or "",
+            "content": (r["content"] or "") if full else None,
+            "publish_date": r["publish_date"] or current.get("publish_date", ""),
+            "effective_date": r["effective_date"] or current.get("effective_date", ""),
+            "score": None,
+        }
+        if full:
+            # 全文模式条数有限，逐条带法规元信息，任一条都能独立说明出处
+            item["metadata"] = {**info, "return_mode": "full"}
+        else:
+            # 目录模式不返回全文，首句只放 metadata，避免被当成完整条文引用
+            item["metadata"] = {"first_sentence": _first_sentence(r["content"])}
+            if index == 0:
+                item["metadata"] = {**info, "return_mode": "outline"}
+        items.append(item)
+
+    return {
+        "items": items,
+        "engine": "sqlite_title_full" if full else "sqlite_title_outline",
+        "notice": None if full else (
+            f"《{law['law_name']}》现行版共 {len(rows)} 条，已列目录；要看某条请指明条号。"
+        ),
+    }
+
+
+# ============================================================
 # API: 语义检索
 # ============================================================
 
@@ -448,10 +568,18 @@ async def search_laws(
 
     items: list[dict] = []
     engine = "sqlite_fts"
+    notice: str | None = None
 
     if effective_mode == "sql":
-        # MCP 法条核对场景：完全跳过 ChromaDB 与 embedding，只查 SQLite
-        items = _search_via_sqlite(q, k, type)
+        # 纯法名查询走整部分档返回；定位不到精确法名时回退普通 FTS。
+        title_payload = _search_title_in_sqlite(q) if _is_law_title_query(q) else None
+        if title_payload is not None:
+            items = title_payload["items"]
+            engine = title_payload["engine"]
+            notice = title_payload["notice"]
+        else:
+            # MCP 法条核对场景：完全跳过 ChromaDB 与 embedding，只查 SQLite
+            items = _search_via_sqlite(q, k, type)
     else:
         # 尝试 ChromaDB 向量检索
         if _chroma_available:
@@ -481,6 +609,7 @@ async def search_laws(
         "query": q,
         "elapsed_ms": elapsed_ms,
         "engine": engine,
+        "notice": notice,
     }
 
 
