@@ -17,6 +17,8 @@ tmp_chroma_*.py
 # 令牌与日志
 api_keys.json
 *.jsonl
+# 拒收名单要进版本控制：只留本地会成为孤本，别人不知道哪些文件被拒、为什么被拒
+!state/rejected-sources.jsonl
 *.log
 
 # Python
