@@ -1,11 +1,11 @@
-"""fmzy 法条查询服务 — 双库架构（ChromaDB 向量检索 + SQLite 精确查找）。
+"""fmzy 法条查询服务 — SQLite 为主，向量检索可选（LAW_SEARCH_MODE=semantic）。
 
 端口: 8001
 数据库:
-  - ChromaDB: /home/fumin/lawyer_model/legal_vector_db (向量语义检索，软链接)
-  - SQLite:   /home/fumin/law_ingest/law_data.db (精确查找 + 法条校验)
+  - SQLite:   /home/fumin/law_ingest/law_data.db (FTS 全文检索 + 精确查找 + 法条校验)
+  - ChromaDB: /home/fumin/lawyer_model/legal_vector_db (仅语义模式加载)
 端点:
-  GET  /api/law/search?q=X&k=Y&type=Z         向量语义检索（降级为 SQLite FTS）
+  GET  /api/law/search?q=X&k=Y&type=Z&mode=sql|semantic   法条检索（默认 sql 只查 SQLite）
   GET  /api/law/article?law_name=X&article_num=Y  精确条号查找
   POST /api/law/verify                         法条批量校验
   GET  /api/law/stats                          库统计信息
@@ -63,6 +63,11 @@ GAP_COLLECTION_NAME = "chinese_laws_gap"
 GJGZK_CHROMA_PATH = "/home/fumin/law_ingest/legal_vector_db_gjgzk"
 GJGZK_COLLECTION_NAME = "chinese_laws_gjgzk"
 EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
+
+# 检索模式：sql = 只查 SQLite（默认，MCP 法条核对场景）；semantic = 向量为主 + SQLite 兜底。
+# 可用环境变量 LAW_SEARCH_MODE 覆盖，非法值回落 sql。
+_RAW_SEARCH_MODE = (os.getenv("LAW_SEARCH_MODE", "sql") or "sql").strip().lower()
+DEFAULT_SEARCH_MODE = _RAW_SEARCH_MODE if _RAW_SEARCH_MODE in ("sql", "semantic") else "sql"
 
 # 认证与统计
 API_KEYS_FILE = "/home/fumin/law_api_keys.json"
@@ -432,26 +437,35 @@ async def search_laws(
     q: str = Query(..., min_length=1),
     k: int = Query(default=10, ge=1, le=50),
     type: str | None = Query(default=None),
+    mode: str | None = Query(default=None, pattern="^(sql|semantic)$"),
     client_id: str = Depends(verify_token),
 ):
-    """向量语义检索法条。ChromaDB 不可用时降级为 SQLite FTS 全文搜索。"""
+    """法条检索。默认 sql 模式只查 SQLite；semantic 模式向量为主 + SQLite 兜底。"""
     start = time.time()
+    effective_mode = (mode or DEFAULT_SEARCH_MODE).strip().lower()
+    if effective_mode not in ("sql", "semantic"):
+        effective_mode = "sql"
+
     items: list[dict] = []
     engine = "sqlite_fts"
 
-    # 尝试 ChromaDB 向量检索
-    if _chroma_available:
-        try:
-            items = _search_via_chromadb(q, k, type)
-            items = _keep_current_articles(items)
-            if len(items) < k:
-                items = _merge_sqlite_items(items, q, k, type)
-            engine = "chromadb+sqlite"
-        except Exception as e:
-            logger.warning("ChromaDB search failed, falling back to SQLite: %s", e)
-
-    if not items and engine != "chromadb":
+    if effective_mode == "sql":
+        # MCP 法条核对场景：完全跳过 ChromaDB 与 embedding，只查 SQLite
         items = _search_via_sqlite(q, k, type)
+    else:
+        # 尝试 ChromaDB 向量检索
+        if _chroma_available:
+            try:
+                items = _search_via_chromadb(q, k, type)
+                items = _keep_current_articles(items)
+                if len(items) < k:
+                    items = _merge_sqlite_items(items, q, k, type)
+                engine = "chromadb+sqlite"
+            except Exception as e:
+                logger.warning("ChromaDB search failed, falling back to SQLite: %s", e)
+
+        if not items:
+            items = _search_via_sqlite(q, k, type)
 
     elapsed_ms = int((time.time() - start) * 1000)
     log_call(
@@ -586,13 +600,38 @@ def _merge_sqlite_items(items: list[dict], q: str, k: int,
     return items
 
 
+_ARTICLE_REF_PATTERN = re.compile(
+    r"第\s*[0-9零〇一二三四五六七八九十百千两]+\s*条(?:之[0-9零〇一二三四五六七八九十]+)?"
+)
+
+
 def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
-    """使用 SQLite FTS 全文搜索（降级方案）。"""
+    """使用 SQLite FTS 全文搜索（默认检索路径）。
+
+    排序：法名精确命中 > 法名包含命中 > 其他；同档按条文长度升序
+    （短条文通常是目标法规的总则/定义条，长条文多为他法引用段）。
+    """
     type_filter = ""
     params: list[Any] = []
     if law_type:
         type_filter = " AND law_type = ?"
         params.append(law_type)
+
+    # 纯法名查询的标题；「法名 + 第X条」先剥离条号再比对法名。
+    # 条文正文不含「第X条」字样，原样 MATCH 会把目标法规的全部条文排除、只留他法引用段。
+    article_ref = _ARTICLE_REF_PATTERN.search(q)
+    title = normalize_law_name(_ARTICLE_REF_PATTERN.sub(" ", q)).strip()
+    has_title = bool(article_ref and title)
+    fts_term = title if has_title else q
+    like_term = f"%{title if has_title else q}%"
+
+    order_by = """ORDER BY CASE
+                    WHEN law_name = ? THEN 0
+                    WHEN law_name LIKE ? THEN 1
+                    ELSE 2
+                  END,
+                  COALESCE(article_number_num, 999999) ASC,
+                  LENGTH(content) ASC, id ASC"""
 
     # 尝试 FTS 搜索
     try:
@@ -603,20 +642,22 @@ def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
                 WHERE id IN (SELECT rowid FROM law_articles_fts WHERE law_articles_fts MATCH ?)
                   AND status = 'effective'
                 {type_filter}
+                {order_by}
                 LIMIT ?""",
-            (q, *params, k),
+            (fts_term, *params, title, f"%{title}%", k),
         ).fetchall()
     except Exception:
-        # FTS 不可用时降级为 LIKE
+        # FTS 不可用时降级为 LIKE（正文或法名命中）
         rows = db.execute(
             f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
                        chapter, section, content, publish_date, effective_date, source_file
                 FROM law_articles
-                WHERE content LIKE ?
+                WHERE (content LIKE ? OR law_name LIKE ?)
                   AND status = 'effective'
                 {type_filter}
+                {order_by}
                 LIMIT ?""",
-            (f"%{q}%", *params, k),
+            (like_term, like_term, *params, title, f"%{title}%", k),
         ).fetchall()
 
     return [
@@ -631,7 +672,9 @@ def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
             "content": r["content"],
             "publish_date": r["publish_date"] or "",
             "effective_date": r["effective_date"] or "",
-            "score": 0.0,
+            # SQLite 路径没有相关度分数；返回 None 让调用方按「无分数」保留，
+            # 而不是当成 0 分被语义阈值过滤掉。
+            "score": None,
         }
         for r in rows
     ]
@@ -1055,17 +1098,20 @@ async def startup_event():
     """服务启动时初始化 ChromaDB（如果可用）。"""
     logger.info("Law Search Service v2.1 starting...")
     logger.info("SQLite: %s", DB_PATH)
-    logger.info("ChromaDB: %s", CHROMA_PATH)
+    logger.info("Search mode: %s (LAW_SEARCH_MODE=%s)", DEFAULT_SEARCH_MODE, _RAW_SEARCH_MODE)
     logger.info("API keys: %d loaded, enforce=%s", len(API_KEYS), API_ENFORCE)
     logger.info("Call log: %s", CALL_LOG_PATH)
 
-    # 尝试初始化 ChromaDB
-    init_chromadb()
-
-    if _chroma_available:
-        logger.info("Vector search enabled (ChromaDB)")
+    if DEFAULT_SEARCH_MODE == "sql":
+        # 只查库模式：不加载 SentenceTransformer、不打开 ChromaDB，避免占满内存。
+        logger.info("SQL-only mode: skip ChromaDB and embedding model loading")
     else:
-        logger.info("Vector search disabled, using SQLite FTS fallback")
+        logger.info("ChromaDB: %s", CHROMA_PATH)
+        init_chromadb()
+        if _chroma_available:
+            logger.info("Vector search enabled (ChromaDB)")
+        else:
+            logger.info("Vector search disabled, using SQLite FTS fallback")
 
 
 if __name__ == "__main__":
