@@ -31,6 +31,11 @@ import json
 from typing import Optional
 from dataclasses import dataclass, field, asdict
 
+try:  # 以包形态被 import（ingest.parse_markdown）
+    from . import name_gate  # noqa: PLC0415
+except ImportError:  # 命令行直接运行，ingest/ 已在 sys.path
+    import name_gate  # type: ignore[no-redef]  # noqa: PLC0415
+
 
 # ============================================================
 # 中文数字转阿拉伯数字
@@ -316,6 +321,8 @@ class Article:
 class ParseResult:
     """单个文件解析结果"""
     law_name: str = ""
+    body_title: str = ""
+    embedded_titles: list = field(default_factory=list)  # 正文里独立成行的他法标题
     law_type: str = ""
     law_type_label: str = ""
     publish_date: str = ""
@@ -325,6 +332,34 @@ class ParseResult:
     articles: list = field(default_factory=list)
     source_file: str = ""
     parse_errors: list = field(default_factory=list)
+
+
+def _extract_body_title(lines: list[str]) -> str:
+    """从正文抽取法规标题，供 name_gate 比对法名。
+
+    只认一级「# 」标题，且标题必须以条例/办法/规定/法这类词收尾；空的 #
+    行是导出残留，跳过不中断。pandoc 常把长法名折成两行，连续的一级标题
+    行要拼起来。没有可靠标题时返回空串，交给夹带判据单独判断。
+    """
+    parts: list[str] = []
+    started = False
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if not started:
+            if not stripped.startswith("#"):
+                continue  # 标题前的 metadata/引用块不参与
+            started = True
+        if stripped.startswith("##") or not stripped.startswith("#"):
+            break
+        title = name_gate.clean_line(stripped[1:].strip())
+        if not title:
+            continue
+        if not name_gate.is_law_title(title):
+            break
+        parts.append(title)
+    return "".join(parts)
 
 
 def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
@@ -522,6 +557,10 @@ def parse_markdown_file(filepath: str, dir_label: str = "") -> ParseResult:
     # 只有条号、始终没有正文的空条（目录里的条号行）不计为法条
     result.articles = [a for a in result.articles if a.content]
 
+    # 法名校验用：正文一级标题、正文里独立成行的他法标题
+    result.body_title = _extract_body_title(lines)
+    result.embedded_titles = name_gate.find_embedded_titles(result.law_name, lines)
+
     result.article_count = len(result.articles)
     return result
 
@@ -573,6 +612,19 @@ def parse_directory(
                   f"已提取 {len(all_articles)} 条法条")
 
         result = parse_markdown_file(filepath, dir_label=dir_label)
+
+        # 法名与正文对不上就整篇拒收：错挂入库比漏收危险，检索侧查不出来
+        reject_reason = name_gate.check_law_name(
+            result.law_name, result.body_title, result.embedded_titles)
+        if reject_reason:
+            stats.setdefault("rejected", []).append({
+                "file": result.source_file,
+                "law_name": result.law_name,
+                "reason": reject_reason,
+            })
+            name_gate.record_rejection(result.source_file, result.law_name, reject_reason)
+            print(f"  [拒收] {result.source_file}: {reject_reason}")
+            continue
 
         if result.parse_errors:
             stats["errors"].extend(
