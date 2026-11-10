@@ -256,14 +256,17 @@ def load_meta(doc_id: str) -> dict | None:
 
 
 def collect_documents(category: str, groups: list[str], limit: int = 0,
-                      doc_ids: set[str] | None = None) -> tuple[list[dict], dict]:
+                      doc_ids: set[str] | None = None,
+                      allow_nonumbered: bool = False) -> tuple[list[dict], dict]:
     """读取 md + meta，返回 (待入库文档, 解析统计)。
 
     doc_ids 非空时只取这些 doc_id，供个别文档的单点补录/修正使用，避免整类重跑。
+    allow_nonumbered 只在显式传参时生效：正文没有条号的文书整篇存 1 条，
+    条号记「全文」，不虚构第X条。
     """
     group_set = set(groups)
     stats = {"scanned": 0, "matched": 0, "no_articles": 0, "dotted": 0,
-             "unreadable": 0, "outside_group": 0}
+             "unreadable": 0, "outside_group": 0, "nonumbered": 0}
     docs: list[dict] = []
     for path in sorted(glob.glob(os.path.join(MD_DIR, "*.md"))):
         doc_id = os.path.basename(path).split("_", 1)[0]
@@ -293,11 +296,18 @@ def collect_documents(category: str, groups: list[str], limit: int = 0,
             chained, chained_gaps, chained_duplicates = split_articles_chained(body)
             if len(chained) > len(articles):
                 articles, gaps, duplicates = chained, chained_gaps, chained_duplicates
+        nonumbered = False
         if not articles:
-            stats["no_articles"] += 1
-            if DOTTED_RE.search(body):
-                stats["dotted"] += 1
-            continue
+            if allow_nonumbered and body.strip():
+                articles = [{"article_number": "全文", "num": 0, "content": body.strip()}]
+                gaps, duplicates = [], []
+                nonumbered = True
+                stats["nonumbered"] += 1
+            else:
+                stats["no_articles"] += 1
+                if DOTTED_RE.search(body):
+                    stats["dotted"] += 1
+                continue
         law_type, law_type_label, law_level = _CATEGORY_MAP[category]
         if category == "地方政府规章" and meta.get("region"):
             law_level = "city"
@@ -325,6 +335,7 @@ def collect_documents(category: str, groups: list[str], limit: int = 0,
             "articles": articles,
             "gaps": gaps,
             "duplicates": duplicates,
+            "nonumbered": nonumbered,
             "group": group,
         })
         if limit and len(docs) >= limit:
@@ -431,7 +442,8 @@ def insert_document(conn: sqlite3.Connection, doc: dict, batch_id: str) -> tuple
          doc["publish_date"], doc["effective_date"], doc["issuing_authority"],
          doc["source_file"], doc["sha256"], len(doc["articles"]), status, batch_id,
          now_iso(), doc["law_level"], doc["law_province"], doc["law_city"],
-         doc["order_no"], doc["source_url"], ",".join(str(n) for n in doc["gaps"]),),
+         doc["order_no"], doc["source_url"],
+         "no_article_numbering" if doc.get("nonumbered") else ",".join(str(n) for n in doc["gaps"]),),
     )
     version_id = int(cur.lastrowid)
     article_ids: list[int] = []
@@ -497,6 +509,8 @@ def main() -> None:
     parser.add_argument("--batch-id", default="")
     parser.add_argument("--db", default=DB_PATH)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--allow-nonumbered", action="store_true",
+                        help="正文无条号的文书整篇存 1 条（条号记「全文」），默认不启用")
     parser.add_argument("--rollback", default="", help="按 batch_id 回滚")
     args = parser.parse_args()
 
@@ -509,7 +523,8 @@ def main() -> None:
 
     groups = [g.strip() for g in args.group.split(",") if g.strip()]
     doc_ids = {d.strip() for d in args.doc_id.split(",") if d.strip()}
-    docs, parse_stats = collect_documents(args.category, groups, args.limit, doc_ids)
+    docs, parse_stats = collect_documents(args.category, groups, args.limit, doc_ids,
+                                          allow_nonumbered=args.allow_nonumbered)
     doc_groups, dropped = plan_documents(docs)
     flat = [d for g in doc_groups for d in g]
     batch_id = args.batch_id or f"gjgzk-{args.category}-{now_iso()}"
@@ -525,7 +540,8 @@ def main() -> None:
                    "dup_docs": sum(1 for d in flat if d["duplicates"]),
                    "docs_with_order_no": sum(1 for d in flat if d["order_no"]),
                    "docs_with_publish_date": sum(1 for d in flat if d["publish_date"]),
-                   "docs_with_effective_date": sum(1 for d in flat if d["effective_date"])})
+                   "docs_with_effective_date": sum(1 for d in flat if d["effective_date"]),
+                   "nonumbered_docs": sum(1 for d in flat if d.get("nonumbered"))})
     if args.dry_run:
         # 试跑不碰库：schema 迁移和状态校正都会写数据，不预览。
         result["dry_run"] = True
