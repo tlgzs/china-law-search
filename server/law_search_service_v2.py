@@ -54,7 +54,7 @@ logger = logging.getLogger("law_search")
 # 配置
 # ============================================================
 
-DB_PATH = "/home/fumin/law_ingest/law_data_20261108.db"
+DB_PATH = os.getenv("LAW_DB_PATH", "/home/fumin/law_ingest/law_data_20261108.db")
 CHROMA_PATH = "/home/fumin/lawyer_model/legal_vector_db"
 COLLECTION_NAME = "chinese_laws"
 # 增量补缺集合（独立路径，绝不写入现有损坏库）
@@ -220,6 +220,37 @@ def verify_token(
     return "unknown"
 
 
+_ARTICLE_TAIL_PATTERN = re.compile(r"第\s*[0-9零〇一二三四五六七八九十百千两]+\s*条.*$")
+
+
+def _extract_law_name(query: Any) -> str:
+    """从查询串中取法名：去书名号和「第X条」及其后的条号描述。"""
+    if not isinstance(query, str):
+        return ""
+    text = normalize_law_name(query)
+    return _ARTICLE_TAIL_PATTERN.sub("", text).strip()
+
+
+def _resolve_matched_law_id(query: Any) -> int | None:
+    """查询归因：法名归一化后与 law_name 或 norm_name 任一相等即取现行版 id。
+
+    与 law_state 的版本解析口径一致（law_name / norm_name 任一命中），
+    同名歧义时按「现行版优先、生效日期新优先」确定性取一条。
+    """
+    name = _extract_law_name(query)
+    if not name:
+        return None
+    row = db.execute(
+        """SELECT id FROM law_versions
+           WHERE law_name = ? OR norm_name = ?
+           ORDER BY CASE WHEN status = 'effective' THEN 0 ELSE 1 END,
+                    COALESCE(effective_date, publish_date, '') DESC, id DESC
+           LIMIT 1""",
+        (name, name),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def log_call(
     *,
     client_id: str,
@@ -239,6 +270,8 @@ def log_call(
         "elapsed_ms": int(elapsed_ms),
         "status": int(status),
         "ip": "",  # 由 uvicorn access log 记录，此处不重复
+        # 统计归因：简称与全称都能归到同一条法规记录
+        "matched_law_id": _resolve_matched_law_id(query),
     }
     try:
         with open(CALL_LOG_PATH, "a", encoding="utf-8") as f:
@@ -465,6 +498,39 @@ def _first_sentence(content: str, limit: int = 60) -> str:
     return sentence if len(sentence) <= limit else sentence[:limit] + "…"
 
 
+def _canonical_law_name(name: str) -> str:
+    """把库内简称换成全称；未命中返回原名，保证简称与全称检索结果一致。"""
+    row = db.execute(
+        """SELECT law_name FROM law_versions
+           WHERE law_name = ? OR norm_name = ?
+           ORDER BY CASE WHEN status = 'effective' THEN 0 ELSE 1 END,
+                    COALESCE(effective_date, publish_date, '') DESC, id DESC
+           LIMIT 1""",
+        (name, name),
+    ).fetchone()
+    return row["law_name"] if row else name
+
+
+def _law_name_variants(law_name: str) -> set[str]:
+    """法名的可比形态：库内全称与简称（norm_name）都算精确命中。
+
+    norm_name 是法规表自带的常用简称（如「民法典」），无需额外别名表。
+    """
+    variants = {normalize_law_name(law_name)}
+    row = db.execute(
+        """SELECT norm_name FROM law_versions
+           WHERE law_name = ?
+           ORDER BY CASE WHEN status = 'effective' THEN 0 ELSE 1 END,
+                    COALESCE(effective_date, publish_date, '') DESC, id DESC
+           LIMIT 1""",
+        (law_name,),
+    ).fetchone()
+    if row and row["norm_name"]:
+        variants.add(normalize_law_name(row["norm_name"]))
+    variants.discard("")
+    return variants
+
+
 def _search_title_in_sqlite(q: str) -> dict | None:
     """纯法名查询：按现行版本整部返回或返回目录。
 
@@ -473,8 +539,9 @@ def _search_title_in_sqlite(q: str) -> dict | None:
     """
     title = normalize_law_name(q)
     law = law_state.classify_law(db, _law_name_candidates(title))
-    # 只认精确法名：简称/模糊名走原检索，避免「城市绿化管理条例」随便命中某市条例
-    if not law or normalize_law_name(law["law_name"]) != title:
+    # 只认精确法名：库内全称或 norm_name 简称都算命中；模糊名仍走原检索，
+    # 避免「城市绿化管理条例」随便命中某市条例
+    if not law or title not in _law_name_variants(law["law_name"]):
         return None
     current = law.get("current_version")
     if not current:
@@ -625,6 +692,8 @@ async def search_laws(
         "elapsed_ms": elapsed_ms,
         "engine": engine,
         "notice": notice,
+        # 供调用方按法规维度归因（简称与全称返回同一 id）
+        "matched_law_id": _resolve_matched_law_id(q),
     }
 
 
@@ -766,6 +835,9 @@ def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
     article_ref = _ARTICLE_REF_PATTERN.search(q)
     title = normalize_law_name(_ARTICLE_REF_PATTERN.sub(" ", q)).strip()
     has_title = bool(article_ref and title)
+    if has_title:
+        # 简称先换成库内全称，否则「民法典 第X条」的精确排序永远不命中
+        title = _canonical_law_name(title)
     fts_term = title if has_title else q
     like_term = f"%{title if has_title else q}%"
 
