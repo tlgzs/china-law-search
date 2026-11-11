@@ -25,6 +25,23 @@ jobs:
       - name: 语法编译（Python 3.10）
         run: python -m py_compile server/*.py mcp/*.py tools/*.py ingest/*.py
 
+      # manifest 双口径：全库口径与非废止口径必须同时声明
+      - name: 校验 manifest 双口径字段
+        run: |
+          python - <<'PY'
+          import json
+          import sys
+
+          required = ["article_count_total", "law_count_total",
+                      "article_count", "law_count", "by_law_type"]
+          manifest = json.load(open("dist/manifest.json", encoding="utf-8"))
+          missing = [key for key in required if key not in manifest]
+          if missing:
+              print(f"::error::dist/manifest.json 缺少双口径字段：{', '.join(missing)}")
+              sys.exit(1)
+          print("manifest 双口径字段齐全")
+          PY
+
       - name: 校验 issue 表单
         run: |
           python -m pip install --quiet pyyaml

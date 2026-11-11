@@ -40,7 +40,7 @@ _ROOT = os.path.dirname(_HERE)
 # 门禁分两段：库侧的在打包前跑，产物侧的在 manifest 写完之后跑。
 # 这里没有、也不要加任何跳过开关 —— 放行只能靠人工改这个文件，git 留痕。
 _PRE_GATES = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
-_POST_GATES = ["G8", "G9", "G10"]
+_POST_GATES = ["G8", "G9", "G10", "G11"]
 
 
 def _g7_registry_path() -> str | None:
@@ -244,10 +244,22 @@ def main() -> None:
     conn = sqlite3.connect(args.db)
     ensure_schema(conn)
     version = meta_get(conn, "corpus_version", "0")
+    # 两个口径必须分开算、分开写，不能再用一个数字去核另一个：
+    #   article_count / law_count              非废止口径（对外展示、旧客户端读取）
+    #   article_count_total / law_count_total  全库口径（含废止版本，安装校验用）
+    articles_total = conn.execute("SELECT COUNT(*) FROM law_articles").fetchone()[0]
     articles = conn.execute("SELECT COUNT(*) FROM law_articles WHERE status != 'repealed'").fetchone()[0]
+    laws_total = conn.execute("SELECT COUNT(DISTINCT norm_name) FROM law_versions").fetchone()[0]
     laws = conn.execute(
         "SELECT COUNT(DISTINCT norm_name) FROM law_versions WHERE status = 'effective'"
     ).fetchone()[0]
+    by_law_type = {
+        (row[0] or "未分类"): row[1]
+        for row in conn.execute(
+            "SELECT COALESCE(law_type_label, ''), COUNT(*) FROM law_articles "
+            "WHERE status != 'repealed' GROUP BY 1"
+        )
+    }
     updated_at = meta_get(conn, "updated_at", "")
     conn.close()
 
@@ -327,8 +339,13 @@ def main() -> None:
             "app_version": app_version(),
             "corpus_version": version,
             "updated_at": updated_at,
+            # 非废止口径：历史字段，语义不变，旧客户端继续读这两个
             "law_count": laws,
             "article_count": articles,
+            # 全库口径：含已废止版本。安装校验与 G11 按各自口径比对，不要交叉
+            "law_count_total": laws_total,
+            "article_count_total": articles_total,
+            "by_law_type": by_law_type,
             # 解压后未压缩库的哈希，比只看压缩包哈希更能证明数据没被换过
             "db_sha256": db_sha,
             "packaged_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -367,7 +384,8 @@ def main() -> None:
         shutil.rmtree(staging, ignore_errors=True)
 
     print(f"发版资产已生成于 {args.out_dir}/")
-    print(f"  版本 {version} ｜ 法规 {laws} 部 ｜ 法条 {articles} 条")
+    print(f"  版本 {version} ｜ 法规 {laws} 部（全库 {laws_total}）｜ "
+          f"法条 {articles} 条（全库 {articles_total}）")
     for a in artifacts:
         print(f"  {a['name']}  {a['size'] / 1048576:.1f} MB  ({a['kind']})")
     print("\n上传命令：")

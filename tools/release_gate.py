@@ -80,6 +80,9 @@ GATES = {
     "G10": ("发布资产完整性", BLOCKING, "打包后 / 发布前校验",
             "发布资产不完整：全量包（zst/gz）或增量包（json/gz/zst）缺失，"
             "或变更账本未更新到本次 corpus_version —— 全量与增量必须一起发，缺一不发"),
+    "G11": ("双口径一致性", BLOCKING, "打包后 / 发布前校验",
+            "manifest 的全库口径与非废止口径必须同时存在且与库重算一致："
+            "缺字段或任一不符即阻断 —— 不允许用一个口径的数字去核另一个口径"),
 }
 
 _MAX_SAMPLES = 8
@@ -860,6 +863,73 @@ def check_g10(conn: sqlite3.Connection, artifacts_dirs: list[str]) -> GateResult
 
 
 # ============================================================
+# G11 双口径一致性
+# ============================================================
+
+# manifest 字段 → (口径说明, 重算 SQL)。顺序即报告里的展示顺序。
+_COUNT_CALIBERS = (
+    ("article_count_total", "全库法条数（含废止）", "SELECT COUNT(*) FROM law_articles"),
+    ("article_count", "非废止法条数", "SELECT COUNT(*) FROM law_articles WHERE status != 'repealed'"),
+    ("law_count_total", "全库法规数（含废止）",
+     "SELECT COUNT(DISTINCT norm_name) FROM law_versions"),
+    ("law_count", "现行法规数",
+     "SELECT COUNT(DISTINCT norm_name) FROM law_versions WHERE status = 'effective'"),
+)
+
+
+def check_g11(conn: sqlite3.Connection, today: str, manifest_path: str | None) -> GateResult:
+    """manifest 必须同时声明两个口径，且四项都与库重算一致。
+
+    历史上只有一个 article_count：非废止口径（1,038,922）被拿去当「全库条数」，
+    对外声明写成 1,383,142，两边各说各话。这里把四项锁死——缺字段也阻断，
+    避免又退回单口径。
+    """
+    r = GateResult("G11")
+    if not manifest_path or not os.path.exists(manifest_path):
+        r.status = SKIP
+        r.message = "未提供 manifest，G11 跳过"
+        return r
+    with open(manifest_path, encoding="utf-8-sig") as f:
+        manifest = json.load(f)
+
+    expected = {key: conn.execute(sql).fetchone()[0] for key, _, sql in _COUNT_CALIBERS}
+    by_type = {
+        (row[0] or "未分类"): row[1]
+        for row in conn.execute(
+            "SELECT COALESCE(law_type_label, ''), COUNT(*) FROM law_articles "
+            "WHERE status != 'repealed' GROUP BY 1")
+    }
+    r.stats = {
+        "db": dict(expected, by_law_type=by_type),
+        "manifest": {key: manifest.get(key) for key in expected},
+    }
+
+    problems: list[str] = []
+    for key, title, _ in _COUNT_CALIBERS:
+        if key not in manifest:
+            problems.append(f"manifest 缺少 {key}（{title}，应为 {expected[key]}）")
+        elif manifest.get(key) != expected[key]:
+            problems.append(f"{key} 不符（{title}）：manifest {manifest.get(key)} / 实算 {expected[key]}")
+
+    declared_types = manifest.get("by_law_type")
+    if not isinstance(declared_types, dict):
+        problems.append("manifest 缺少 by_law_type（应为分类型非废止条数）")
+    elif declared_types != by_type:
+        diff = [
+            f"{label}: manifest {declared_types.get(label)} / 实算 {by_type.get(label)}"
+            for label in sorted(set(declared_types) | set(by_type))
+            if declared_types.get(label) != by_type.get(label)
+        ]
+        problems.append("by_law_type 不符：" + "；".join(diff[:5]))
+
+    for p in problems:
+        r.sample(p)
+    if problems:
+        r.fail(GATES["G11"][3])
+    return r
+
+
+# ============================================================
 # 主流程
 # ============================================================
 
@@ -893,6 +963,8 @@ def run(db_path: str, manifest_path: str | None, version_file: str | None,
             results.append(check_g9(conn, today, manifest_path, artifacts_dir))
         elif gate == "G10":
             results.append(check_g10(conn, [artifacts_dir] + list(extra_artifacts_dirs or [])))
+        elif gate == "G11":
+            results.append(check_g11(conn, today, manifest_path))
     conn.close()
     return results
 

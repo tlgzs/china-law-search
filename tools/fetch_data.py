@@ -548,7 +548,64 @@ _GITHUB_HINT = (
 )
 
 
-def install_from_file(src: str, db: str, expect_sha: str | None) -> None:
+# 安装校验口径：manifest 字段 → (口径说明, 重算 SQL)。
+# 全库口径与非废止口径各自核各自的数，禁止交叉比对。
+_COUNT_CALIBERS = (
+    ("article_count_total", "全库法条数（含废止）", "SELECT COUNT(*) FROM law_articles"),
+    ("article_count", "非废止法条数", "SELECT COUNT(*) FROM law_articles WHERE status != 'repealed'"),
+    ("law_count_total", "全库法规数（含废止）",
+     "SELECT COUNT(DISTINCT norm_name) FROM law_versions"),
+    ("law_count", "现行法规数",
+     "SELECT COUNT(DISTINCT norm_name) FROM law_versions WHERE status = 'effective'"),
+)
+
+
+def _db_counts(db_path: str) -> dict:
+    """只读统计本地库各项口径；老库没有 law_versions 时跳过对应项。"""
+    counts: dict = {}
+    conn = sqlite3.connect("file:" + db_path + "?mode=ro", uri=True)
+    try:
+        for key, _, sql in _COUNT_CALIBERS:
+            try:
+                counts[key] = conn.execute(sql).fetchone()[0]
+            except sqlite3.OperationalError:
+                continue
+    finally:
+        conn.close()
+    return counts
+
+
+def _verify_counts(db_path: str, manifest: dict) -> list[str]:
+    """按 manifest 自己声明的口径核对本地库，返回不符项（空列表表示通过）。
+
+    旧 manifest 只有非废止口径，就只核这两项；带全库口径时四项全核。
+    """
+    actual = _db_counts(db_path)
+    problems = []
+    for key, title, _ in _COUNT_CALIBERS:
+        if key not in manifest or key not in actual:
+            continue
+        if manifest[key] != actual[key]:
+            problems.append(f"{title}不符：manifest {manifest[key]} / 本地 {actual[key]}")
+    return problems
+
+
+def _describe_counts(manifest: dict) -> str:
+    """展示用条数：有全库口径就一起给出，旧 manifest 退回单口径。"""
+    laws = manifest.get("law_count", "?")
+    articles = manifest.get("article_count", "?")
+    laws_total = manifest.get("law_count_total")
+    articles_total = manifest.get("article_count_total")
+    if laws_total is None and articles_total is None:
+        return f"法规 {laws} 部 / 法条 {articles} 条"
+    return (
+        f"法规 {laws} 部（全库 {laws_total if laws_total is not None else '?'}）"
+        f"/ 法条 {articles} 条（全库 {articles_total if articles_total is not None else '?'}）"
+    )
+
+
+def install_from_file(src: str, db: str, expect_sha: str | None,
+                      manifest: dict | None = None) -> None:
     print(f"从本地文件安装：{src}")
     if expect_sha:
         got = _sha256(src)
@@ -591,6 +648,15 @@ def install_from_file(src: str, db: str, expect_sha: str | None) -> None:
         # 空库的 integrity_check 也会返回 ok，只看它会把好库覆盖成空库
         os.remove(tmp)
         raise SystemExit("解压结果里没有 corpus_meta.corpus_version，不是本项目的数据库，已放弃安装。")
+
+    if manifest:
+        # 按 manifest 自己声明的口径核对；不符就不覆盖现有库
+        problems = _verify_counts(tmp, manifest)
+        if problems:
+            os.remove(tmp)
+            raise SystemExit(
+                "解压结果与 manifest 条数不符，已放弃安装（现有库未动）：\n  "
+                + "\n  ".join(problems))
 
     # 到位前留一份旧库，出错能回退
     if os.path.exists(db):
@@ -711,6 +777,11 @@ def _run_source(label: str, manifest: dict, assets: dict, db: str,
             tmp = _fetch_one(art, url, part_dir)
             _step("应用增量")
             result = install_delta(tmp, db)
+            # 增量结果同样按 manifest 口径核；不符就抛出去，由外层回落全量
+            problems = _verify_counts(db, manifest)
+            if problems:
+                raise SystemExit(
+                    "增量应用后条数与 manifest 不符：\n  " + "\n  ".join(problems))
             note = f"（来源：{label}）" if announce_source else ""
             print(f"\n已更新到 {result.get('to_version')}{note}。")
             return
@@ -739,7 +810,7 @@ def _run_source(label: str, manifest: dict, assets: dict, db: str,
         _step(f"下载 {art['name']}")
         tmp = _fetch_one(art, url, part_dir)   # 内含 sha256 校验，校验不过会整份重下
         _step("解压并安装")
-        install_from_file(tmp, db, None)
+        install_from_file(tmp, db, None, manifest)
     finally:
         if tmp and not args.keep and os.path.exists(tmp):
             os.remove(tmp)
@@ -793,8 +864,7 @@ def main() -> int:
         manifest, assets = fetch_manifest(repo)
         remote_ver = manifest.get("corpus_version", "")
         print(f"Release：{manifest.get('corpus_version')}  "
-              f"（法规 {manifest.get('law_count', '?')} 部 / "
-              f"法条 {manifest.get('article_count', '?')} 条）")
+              f"（{_describe_counts(manifest)}）")
 
         cur_ver = local_version(db)
         if cur_ver:
@@ -844,8 +914,7 @@ def main() -> int:
     best_label, best_manifest, _ = groups[order[0]][0]
     remote_ver = best_manifest.get("corpus_version", "")
     print(f"Release：{remote_ver}  "
-          f"（法规 {best_manifest.get('law_count', '?')} 部 / "
-          f"法条 {best_manifest.get('article_count', '?')} 条，来自 {best_label}）")
+          f"（{_describe_counts(best_manifest)}，来自 {best_label}）")
 
     cur_ver = local_version(db)
     if cur_ver:
