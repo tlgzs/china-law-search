@@ -438,11 +438,11 @@ _TITLE_DECORATION_PATTERN = re.compile(r"[《》〈〉\s]")
 _TITLE_SENTENCE_PATTERN = re.compile(r"[，,。；;：:、？！?!]")
 _TITLE_MAX_LENGTH = 60
 
-# 分档与出口闸：现行版 ≤60 条才可能整部返回；全文单次最多 30 条、
-# 正文合计最多 20000 字符，任一超限转目录模式。
-TITLE_FULL_MAX_ARTICLES = 60
-EXPORT_MAX_ITEMS = 30
-EXPORT_MAX_CONTENT_CHARS = 20000
+# 分档与出口闸：现行版 ≤20 条且正文合计 ≤8000 字符才整部返回；
+# 其余一律目录模式，目录最多列 50 条并附总条数，避免整部返回超长响应。
+TITLE_FULL_MAX_ARTICLES = 20
+TITLE_FULL_MAX_CONTENT_CHARS = 8000
+TITLE_OUTLINE_MAX_ITEMS = 50
 
 
 def _is_law_title_query(q: str) -> bool:
@@ -510,12 +510,13 @@ def _search_title_in_sqlite(q: str) -> dict | None:
     total_chars = sum(len(r["content"] or "") for r in rows)
     full = (
         len(rows) <= TITLE_FULL_MAX_ARTICLES
-        and len(rows) <= EXPORT_MAX_ITEMS
-        and total_chars <= EXPORT_MAX_CONTENT_CHARS
+        and total_chars <= TITLE_FULL_MAX_CONTENT_CHARS
     )
+    # 目录模式最多列 50 条，总条数始终放在 metadata / notice 里
+    listed_rows = rows if full else rows[:TITLE_OUTLINE_MAX_ITEMS]
 
     items: list[dict] = []
-    for index, r in enumerate(rows):
+    for index, r in enumerate(listed_rows):
         item = {
             "law_name": law["law_name"],
             "law_type": law_type,
@@ -534,17 +535,28 @@ def _search_title_in_sqlite(q: str) -> dict | None:
             item["metadata"] = {**info, "return_mode": "full"}
         else:
             # 目录模式不返回全文，首句只放 metadata，避免被当成完整条文引用
-            item["metadata"] = {"first_sentence": _first_sentence(r["content"])}
+            first_sentence = _first_sentence(r["content"])
             if index == 0:
-                item["metadata"] = {**info, "return_mode": "outline"}
+                item["metadata"] = {**info, "first_sentence": first_sentence, "return_mode": "outline"}
+            else:
+                item["metadata"] = {"first_sentence": first_sentence}
         items.append(item)
+
+    if full:
+        notice = None
+    elif len(listed_rows) < len(rows):
+        notice = (
+            f"《{law['law_name']}》现行版共 {len(rows)} 条，"
+            f"目录仅列前 {len(listed_rows)} 条；要看哪条请给条号。"
+        )
+    else:
+        notice = f"《{law['law_name']}》现行版共 {len(rows)} 条，已列目录；要看哪条请给条号。"
 
     return {
         "items": items,
+        "total": len(rows),
         "engine": "sqlite_title_full" if full else "sqlite_title_outline",
-        "notice": None if full else (
-            f"《{law['law_name']}》现行版共 {len(rows)} 条，已列目录；要看某条请指明条号。"
-        ),
+        "notice": notice,
     }
 
 
@@ -569,6 +581,7 @@ async def search_laws(
     items: list[dict] = []
     engine = "sqlite_fts"
     notice: str | None = None
+    total = 0
 
     if effective_mode == "sql":
         # 纯法名查询走整部分档返回；定位不到精确法名时回退普通 FTS。
@@ -577,6 +590,8 @@ async def search_laws(
             items = title_payload["items"]
             engine = title_payload["engine"]
             notice = title_payload["notice"]
+            # 目录模式 items 已截断，total 必须是现行版真实条数
+            total = title_payload["total"]
         else:
             # MCP 法条核对场景：完全跳过 ChromaDB 与 embedding，只查 SQLite
             items = _search_via_sqlite(q, k, type)
@@ -605,7 +620,7 @@ async def search_laws(
     )
     return {
         "items": items,
-        "total": len(items),
+        "total": total or len(items),
         "query": q,
         "elapsed_ms": elapsed_ms,
         "engine": engine,
