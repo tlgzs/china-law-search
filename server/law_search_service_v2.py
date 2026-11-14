@@ -818,64 +818,70 @@ _ARTICLE_REF_PATTERN = re.compile(
 )
 
 
-def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
-    """使用 SQLite FTS 全文搜索（默认检索路径）。
+_TRIGRAM_MIN_TERM = 3
+_SQLITE_ITEM_COLUMNS = (
+    "law_name, law_type, law_type_label, article_number, article_number_num, "
+    "chapter, section, content, publish_date, effective_date, source_file"
+)
+_SQLITE_ITEM_COLUMNS_ALIASED = (
+    "a.law_name, a.law_type, a.law_type_label, a.article_number, a.article_number_num, "
+    "a.chapter, a.section, a.content, a.publish_date, a.effective_date, a.source_file"
+)
 
-    排序：法名精确命中 > 法名包含命中 > 其他；同档按条文长度升序
-    （短条文通常是目标法规的总则/定义条，长条文多为他法引用段）。
-    """
-    type_filter = ""
-    params: list[Any] = []
-    if law_type:
-        type_filter = " AND law_type = ?"
-        params.append(law_type)
 
-    # 纯法名查询的标题；「法名 + 第X条」先剥离条号再比对法名。
-    # 条文正文不含「第X条」字样，原样 MATCH 会把目标法规的全部条文排除、只留他法引用段。
-    article_ref = _ARTICLE_REF_PATTERN.search(q)
-    title = normalize_law_name(_ARTICLE_REF_PATTERN.sub(" ", q)).strip()
-    has_title = bool(article_ref and title)
-    if has_title:
-        # 简称先换成库内全称，否则「民法典 第X条」的精确排序永远不命中
-        title = _canonical_law_name(title)
-    fts_term = title if has_title else q
-    like_term = f"%{title if has_title else q}%"
+def _query_terms(q: str, limit: int = 8) -> list[str]:
+    """把查询切成可进 trigram FTS 的词；不足 3 字的词 trigram 无法命中，跳过。"""
+    terms: list[str] = []
+    for token in re.split(r"[\s，。；;：:、,\.！!？?（）()《》]+", q or ""):
+        token = token.strip()
+        if len(token) < _TRIGRAM_MIN_TERM or token in terms:
+            continue
+        terms.append(token)
+        if len(terms) >= limit:
+            break
+    return terms
 
-    order_by = """ORDER BY CASE
-                    WHEN law_name = ? THEN 0
-                    WHEN law_name LIKE ? THEN 1
-                    ELSE 2
-                  END,
-                  COALESCE(article_number_num, 999999) ASC,
-                  LENGTH(content) ASC, id ASC"""
 
-    # 尝试 FTS 搜索
+def _leading_law_name(q: str) -> str | None:
+    """查询以一部已收录法规开头时返回库内全称，用于把召回收敛到该法规。"""
+    normalized = normalize_law_name(q)
+    if len(normalized) < _TRIGRAM_MIN_TERM:
+        return None
+    row = db.execute(
+        """SELECT law_name FROM law_versions
+           WHERE ? LIKE law_name || '%'
+           ORDER BY LENGTH(law_name) DESC LIMIT 1""",
+        (normalized,),
+    ).fetchone()
+    return row["law_name"] if row else None
+
+
+def _article_leading_law_name(q: str) -> str | None:
+    """「简称 + 第X条」时把简称换成库内全称，供条文限定检索收敛。"""
+    match = _ARTICLE_REF_PATTERN.search(q or "")
+    if not match:
+        return None
+    prefix = normalize_law_name(q[: match.start()]).strip()
+    if len(prefix) < 2:
+        return None
+    canonical = _canonical_law_name(prefix)
+    return canonical if canonical != prefix else None
+
+
+def _article_number_from_query(q: str) -> int | None:
+    match = _ARTICLE_REF_PATTERN.search(q or "")
+    if not match:
+        return None
+    number = re.search(r"[0-9零〇一二三四五六七八九十百千两]+", match.group(0))
+    if not number:
+        return None
     try:
-        rows = db.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                       chapter, section, content, publish_date, effective_date, source_file
-                FROM law_articles
-                WHERE id IN (SELECT rowid FROM law_articles_fts WHERE law_articles_fts MATCH ?)
-                  AND status = 'effective'
-                {type_filter}
-                {order_by}
-                LIMIT ?""",
-            (fts_term, *params, title, f"%{title}%", k),
-        ).fetchall()
+        return chinese_to_arabic(number.group(0))
     except Exception:
-        # FTS 不可用时降级为 LIKE（正文或法名命中）
-        rows = db.execute(
-            f"""SELECT law_name, law_type, law_type_label, article_number, article_number_num,
-                       chapter, section, content, publish_date, effective_date, source_file
-                FROM law_articles
-                WHERE (content LIKE ? OR law_name LIKE ?)
-                  AND status = 'effective'
-                {type_filter}
-                {order_by}
-                LIMIT ?""",
-            (like_term, like_term, *params, title, f"%{title}%", k),
-        ).fetchall()
+        return None
 
+
+def _rows_to_items(rows: list[sqlite3.Row]) -> list[dict]:
     return [
         {
             "law_name": r["law_name"],
@@ -894,6 +900,122 @@ def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _scoped_law_rows(
+    law_name: str,
+    terms: list[str],
+    k: int,
+    law_type: str | None,
+    article_num: int | None,
+) -> list[sqlite3.Row]:
+    """在指定法规内检索：条号精确命中优先，其次关键词命中数多的条文。"""
+    type_filter = ""
+    params: list[Any] = [law_name]
+    if law_type:
+        type_filter = " AND law_type = ?"
+        params.append(law_type)
+
+    order_parts: list[str] = []
+    if article_num is not None:
+        order_parts.append("CASE WHEN article_number_num = ? THEN 0 ELSE 1 END")
+        params.append(article_num)
+    if terms:
+        hits = " + ".join(["CASE WHEN content LIKE ? THEN 1 ELSE 0 END"] * len(terms))
+        order_parts.append(f"({hits}) DESC")
+        params.extend(f"%{term}%" for term in terms)
+    order_parts.extend(
+        [
+            "COALESCE(article_number_num, 999999) ASC",
+            "LENGTH(content) ASC",
+            "id ASC",
+        ]
+    )
+    params.append(k)
+    return db.execute(
+        f"""SELECT {_SQLITE_ITEM_COLUMNS}
+            FROM law_articles
+            WHERE law_name = ? AND status = 'effective' {type_filter}
+            ORDER BY {", ".join(order_parts)}
+            LIMIT ?""",
+        tuple(params),
+    ).fetchall()
+
+
+def _search_via_sqlite(q: str, k: int, law_type: str | None) -> list[dict]:
+    """使用 SQLite FTS 全文搜索（默认检索路径）。
+
+    查询开头是已收录法规时，先在该法规内按条号/关键词排序召回；否则走 FTS。
+    多词查询全部命中为 0 时退一步做 OR 召回并按 bm25 排序，避免长查询全空。
+    """
+    type_filter = ""
+    params: list[Any] = []
+    if law_type:
+        type_filter = " AND law_type = ?"
+        params.append(law_type)
+
+    terms = _query_terms(q)
+    title = _leading_law_name(q)
+    if not title:
+        title = _article_leading_law_name(q)
+    if title:
+        title_norm = normalize_law_name(title)
+        scoped_terms = [term for term in terms if normalize_law_name(term) != title_norm]
+        rows = _scoped_law_rows(
+            title, scoped_terms, k, law_type, _article_number_from_query(q)
+        )
+        if not rows and scoped_terms:
+            rows = _scoped_law_rows(title, [], k, law_type, _article_number_from_query(q))
+        return _rows_to_items(rows)
+
+    order_by = (
+        "ORDER BY COALESCE(article_number_num, 999999) ASC, "
+        "LENGTH(content) ASC, id ASC"
+    )
+    try:
+        rows = db.execute(
+            f"""SELECT {_SQLITE_ITEM_COLUMNS}
+                FROM law_articles
+                WHERE id IN (SELECT rowid FROM law_articles_fts WHERE law_articles_fts MATCH ?)
+                  AND status = 'effective'
+                {type_filter}
+                {order_by}
+                LIMIT ?""",
+            (q, *params, k),
+        ).fetchall()
+    except Exception:
+        # FTS 不可用时降级为 LIKE（正文或法名命中）
+        rows = db.execute(
+            f"""SELECT {_SQLITE_ITEM_COLUMNS}
+                FROM law_articles
+                WHERE (content LIKE ? OR law_name LIKE ?)
+                  AND status = 'effective'
+                {type_filter}
+                {order_by}
+                LIMIT ?""",
+            (f"%{q}%", f"%{q}%", *params, k),
+        ).fetchall()
+    if rows:
+        return _rows_to_items(rows)
+
+    if len(terms) > 1:
+        match_expr = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        aliased_filter = type_filter.replace("law_type", "a.law_type")
+        try:
+            rows = db.execute(
+                f"""SELECT {_SQLITE_ITEM_COLUMNS_ALIASED}
+                    FROM law_articles a
+                    JOIN law_articles_fts ON law_articles_fts.rowid = a.id
+                    WHERE law_articles_fts MATCH ? AND a.status = 'effective'
+                    {aliased_filter}
+                    ORDER BY bm25(law_articles_fts),
+                             COALESCE(a.article_number_num, 999999) ASC, a.id ASC
+                    LIMIT ?""",
+                (match_expr, *params, k),
+            ).fetchall()
+        except Exception:
+            rows = []
+    return _rows_to_items(rows)
 
 
 def _law_name_candidates(law_name: str) -> list[str]:
@@ -1010,6 +1132,31 @@ async def get_law_article(
                 item["law_name"], item["article_number"], item["article_status"],
                 item["citation_valid"])
     return result
+
+
+@app.get("/api/law/version-titles")
+async def law_version_titles(
+    ids: str = Query(..., min_length=1),
+    client_id: str = Depends(verify_token),
+):
+    """批量把法规版本 id 换成法定全称（后台归因展示用）。"""
+    law_ids: list[int] = []
+    for part in ids.split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) > 0 and int(part) not in law_ids:
+            law_ids.append(int(part))
+        if len(law_ids) >= 50:
+            break
+    if not law_ids:
+        return {"titles": {}}
+    placeholders = ",".join("?" for _ in law_ids)
+    rows = db.execute(
+        f"SELECT id, law_name FROM law_versions WHERE id IN ({placeholders})",
+        tuple(law_ids),
+    ).fetchall()
+    return {
+        "titles": {str(row["id"]): row["law_name"] for row in rows if row["law_name"]}
+    }
 
 
 # ============================================================
