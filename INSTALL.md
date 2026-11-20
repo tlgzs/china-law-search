@@ -25,14 +25,14 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 >    装之前告诉我你打算装到哪个路径。
 > 3. **克隆仓库**：`git clone https://github.com/tlgzs/china-law-search.git`
 > 4. **下载数据**：`cd china-law-search && python3 tools/fetch_data.py`
->    这一步会从 GitHub Release 下载约 676 MB 的数据库，会校验 sha256 后再就位。
->    装过 zstd 的话自动改下 514 MB 的 .zst 版本，内容一样。
+>    这一步会从 GitHub Release 下载约 1.3 GB 的数据库，会校验 sha256 后再就位。
+>    装过 zstd 的话自动改下 1.1 GB 的 .zst 版本，内容一样。
 >    如果它报「找不到仓库」，改用
 >    `python3 tools/fetch_data.py --repo tlgzs/china-law-search` 重试。
 > 5. **接入 AI 客户端**：`python3 mcp/install.py --all --yes`
 >    它会把配置写进本机 AI 客户端的 MCP 配置，写入前会自动备份原文件。
 > 6. **自检**：`python3 mcp/server.py --selftest`，把输出**原样**贴给我。
->    正常应该看到 5 行 `OK` 加最后一行「全部通过」，并且条文总数是 1,040,609。
+>    正常应该看到 5 行 `OK` 加最后一行「全部通过」，并且条文总数是 1,386,336。
 > 7. **验收**：用 MCP 的 `get_article` 工具查「劳动合同法 第八十二条」，
 >    把条文原文和返回值里的 `data_snapshot` 一起给我。查得到、条号对得上，才算装好。
 > 8. **最后启动本地查询界面**：运行 `./start.sh`（Windows 用 `启动.bat`），
@@ -60,7 +60,7 @@ Trae、Codex 任何一个**能读写本机文件**的 AI。它会自己检查环
 |---|---|---|---|
 | 1 | 检查 `python3` / `git` | 版本号 | 几秒 |
 | 3 | 克隆仓库 | 50 个文件，约 810 KB | 10 秒内 |
-| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 676 MB |
+| 4 | 下载数据库 | 进度条 → `sha256 校验通过` | 视网速，约 1.3 GB |
 | 5 | 写 MCP 配置 | 列出探测到的客户端，逐个 `已写入` | 几秒 |
 | 6 | 自检 | 5 行 `OK` + `全部通过` | 约 2 秒 |
 | 7 | 查一个法条 | 条文原文 + 数据版本号 | 1 秒 |
@@ -133,8 +133,8 @@ python3 tools/fetch_data.py --from-file ~/Downloads/law_data-2026.10.30.db.gz   
 **公司网络下不动 GitHub**：用浏览器打开仓库的 Releases 页，手动下载
 `law_data-<版本>.db.gz`，再用 `--from-file` 指过去。`.gz` 不需要装任何解压工具。
 
-**磁盘要留够 4 GB**：库解压后 2.4 GB，下载的压缩包 676 MB，解压时还要一份临时文件。
-**升级已有数据时要留 8 GB**——脚本会把旧库改名成 `law_data.db.bak` 留着，确认新版没问题后可以手动删掉它。
+**磁盘要留够 12 GB**：库解压后 4.0 GB，下载的压缩包 1.3 GB，解压时还要一份临时文件。
+**升级已有数据时要留 20 GB**——脚本会把旧库改名成 `law_data.db.bak` 留着，确认新版没问题后可以手动删掉它。
 
 ### 3.3 接入 AI 客户端
 
@@ -163,16 +163,16 @@ python3 mcp/server.py --selftest
 ```
 库路径：/Users/你的用户名/china-law-search/data/law_data.db
 OK   initialize → protocol=2024-11-05
-OK   tools/list → ['get_article', 'get_law', 'search_articles', 'verify_citation']
-OK   stats → 条文 1040609 / 现行 700551 / 法规 16874
-     快照 → corpus_version='2026.11.03.2' 条文截至=2026-10-17
+OK   tools/list → ["get_article", "get_law_versions", "get_law", "search_articles", "verify_citation"]
+OK   stats → 条文 1386336 / 现行 1037170 / 法规 26796
+     快照 → corpus_version='2026.11.20.1' 条文截至=2026-11-06
 OK   get_article → ... 第一条 (1018 字节)
 OK   verify_citation → 1/2 命中（预期 1/2）
 
 全部通过
 ```
 
-第 3 行的三个数字对得上（条文 1,040,609 / 现行 698,728 / 法规 16,830），
+第 3 行的三个数字对得上（条文 1,386,336 / 现行 1,037,170 / 法规 26,796），
 说明库是完整的。数字差很多，就是库没下好，重跑 3.2。
 
 「条文截至」是你手里这份数据的收录日期，回答时效性问题时要拿它说话。
@@ -185,7 +185,7 @@ OK   verify_citation → 1/2 命中（预期 1/2）
 python3 tools/check_update.py
 ```
 
-它会分别报数据和程序：「法规库 2026.11.03.2 → 2026.11.30.1，可增量 3.2 MB」。
+它会分别报数据和程序：「法规库 2026.11.11.1 → 2026.11.20.1，可增量 0.6 MB」。
 数据有新版本就装：
 
 ```bash
@@ -198,7 +198,7 @@ macOS 上也可以直接双击 **`更新数据.command`**，不用敲命令。
 检索框上方亮一条琥珀色提示，点「立即更新」才装，点「×」本次不再打扰。
 
 - 已经是最新：什么都不做，直接退出。
-- 有更新：**只下载变更的那几 MB**，不用重下 676 MB 全量。本地停在哪一版都行，
+- 有更新：**只下载变更的那几 MB**，不用重下 1.3 GB 全量。本地停在哪一版都行，
   不用逐版追。
 - 应用约 100 秒，大部分时间在重建全文索引，这期间别关窗口。
 - 万一增量这条路不通，脚本会自己改下全量，不会把你停在报错上。
@@ -274,11 +274,11 @@ Windows 上是把 `启动.bat` 的快捷方式放进「启动」文件夹（`Win
 | 下载到一半断了 | 网络 | 直接重跑同一条命令，会重新下；旧库不会被破坏 |
 | `sha256 不匹配` | 下载损坏或代理改写了内容 | 重跑；仍失败就手动下 `.gz` 包再 `--from-file` |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | 公司代理 / 内网拦截 | 用浏览器下包，再 `--from-file` |
-| 自检条文数远小于 1,040,609 | 库没下好，或下的是旧版本 | 看 `--check` 输出，跑 `--full` 重下全量 |
+| 自检条文数远小于 1,386,336 | 库没下好，或下的是旧版本 | 看 `--check` 输出，跑 `--full` 重下全量 |
 | WorkBuddy 里看不到工具 | 没点「信任」，或没重开会话 | 见第四节 |
 | agent 说「查不到这条法条」 | 可能真不在库里（部门规章不在） | 先用 `get_law` 查法规名是否存在，再判断 |
 | `database is locked` | 有另一个进程正在写库 | 关掉正在跑的更新脚本再试 |
-| 磁盘不足 | 库 2.4 GB + 压缩包 676 MB | 新装留 4 GB，升级留 8 GB |
+| 磁盘不足 | 库 4.0 GB + 压缩包 1.3 GB | 新装留 12 GB，升级留 20 GB |
 
 判断「是装坏了还是本来就没有」的最快办法：
 
@@ -309,7 +309,7 @@ uv python uninstall 3.12          # 只用 uv 装过的 Python
 rm -rf ~/.local/share/uv ~/.local/bin/uv   # 连 uv 本身也删掉
 ```
 
-删除整个 `china-law-search/` 目录会带走代码和 2.4 GB 数据；系统 Python 全程没有被改动，
+删除整个 `china-law-search/` 目录会带走代码和 4.0 GB 数据；系统 Python 全程没有被改动，
 不需要也不应该去动它。
 
 ---
@@ -317,4 +317,4 @@ rm -rf ~/.local/share/uv ~/.local/bin/uv   # 连 uv 本身也删掉
 **壹律从简** · [www.yilvai.com](https://www.yilvai.com) · 作者：网络小菜鸟 · 微信：`pmfumin`
 
 按上面排查表还是卡住，把**原样报错**发我（微信或 [Issues](https://github.com/tlgzs/china-law-search/issues)），
-别自己删库重来——数据包 676 MB，重下不值得。
+别自己删库重来——数据包 1.3 GB，重下不值得。
