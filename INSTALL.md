@@ -164,7 +164,7 @@ python3 mcp/server.py --selftest
 库路径：/Users/你的用户名/china-law-search/data/law_data.db
 OK   initialize → protocol=2024-11-05
 OK   tools/list → ["get_article", "get_law_versions", "get_law", "search_articles", "verify_citation"]
-OK   stats → 条文 1386336 / 现行 1037170 / 法规 26796
+OK   stats → 条文 1386336 / 现行 1037196 / 法规 26796
      快照 → corpus_version='2026.11.20.1' 条文截至=2026-11-06
 OK   get_article → ... 第一条 (1018 字节)
 OK   verify_citation → 1/2 命中（预期 1/2）
@@ -172,7 +172,7 @@ OK   verify_citation → 1/2 命中（预期 1/2）
 全部通过
 ```
 
-第 3 行的三个数字对得上（条文 1,386,336 / 现行 1,037,170 / 法规 26,796），
+第 3 行的三个数字对得上（条文 1,386,336 / 现行 1,037,196 / 法规 26,796），
 说明库是完整的。数字差很多，就是库没下好，重跑 3.2。
 
 「条文截至」是你手里这份数据的收录日期，回答时效性问题时要拿它说话。
